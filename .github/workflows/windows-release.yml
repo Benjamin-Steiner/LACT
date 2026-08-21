@@ -30,6 +30,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: windows-preview-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-headless-release:
     runs-on: windows-latest
@@ -97,13 +101,12 @@ jobs:
       - name: Build GUI and daemon executables
         shell: pwsh
         env:
-          PATH: C:\msys64\mingw64\bin;${{ env.PATH }}
           PKG_CONFIG_PATH: C:\msys64\mingw64\lib\pkgconfig;C:\msys64\mingw64\share\pkgconfig
           PKG_CONFIG_ALLOW_CROSS: '1'
-        run: >-
-          cargo build --release -p lact --target x86_64-pc-windows-gnu
-          --no-default-features --features lact-gui,nvidia
-          --bin lact --bin lact-gui-windows
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\mingw64\bin\gcc.exe
+        run: |
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\msys64\mingw64\bin;$env:PATH"
+          cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia --bin lact --bin lact-gui-windows
 
       - name: Assemble portable GUI runtime
         shell: pwsh
