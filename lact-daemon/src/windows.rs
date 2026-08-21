@@ -1,5 +1,6 @@
+use crate::windows_nvapi::NvApi;
 use amdgpu_sysfs::hw_mon::Temperature;
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, ensure};
 use lact_schema::{
     ClocksInfo, ClocksTable, ClockspeedStats, DeviceInfo, DeviceListEntry, DeviceStats, DeviceType,
     DrmInfo, FanStats, LinkInfo, NvidiaClockOffset, NvidiaClocksTable, Pong, PowerStats, Request,
@@ -9,6 +10,7 @@ use lact_schema::{
 use nvml_wrapper::{
     Device, Nvml,
     enum_wrappers::device::{Clock, PerformanceState, TemperatureSensor, TemperatureThreshold},
+    enums::device::GpuLockedClocksSetting,
 };
 use serde::Serialize;
 use std::{cmp, collections::HashMap, env, fmt::Debug};
@@ -78,6 +80,9 @@ where
             Ok(Request::SetPowerCap { id, cap }) => ok_response(set_power_cap(id, cap)?)?,
             Ok(Request::SetClocksValue { id, command }) => {
                 ok_response(set_clocks_value(id, &command)?)?
+            }
+            Ok(Request::BatchSetClocksValue { id, commands }) => {
+                ok_response(batch_set_clocks_value(id, &commands)?)?
             }
             Ok(_) => serde_json::to_vec(&Response::<()>::from(anyhow!(
                 "This request is not implemented by the Windows backend yet"
@@ -316,6 +321,29 @@ fn device_clocks_info(id: &str) -> anyhow::Result<ClocksInfo> {
         }
     }
 
+    let mut gpu_vf_curve = vec![];
+    let mut voltage_boost = None;
+    match NvApi::new() {
+        Ok(nvapi) => match device.pci_info() {
+            Ok(pci) => match nvapi.find_matching_gpu(pci.bus) {
+                Ok(Some(handle)) => {
+                    gpu_vf_curve = nvapi.get_vf_curve(handle).unwrap_or_else(|err| {
+                        warn!("NVAPI V/F curve is unavailable: {err:#}");
+                        vec![]
+                    });
+                    voltage_boost = nvapi.get_voltage_boost(handle).map_err(|err| {
+                        warn!("NVAPI voltage boost is unavailable: {err:#}");
+                        err
+                    }).ok();
+                }
+                Ok(None) => warn!("NVAPI did not find a GPU matching PCI bus {}", pci.bus),
+                Err(err) => warn!("Could not match NVAPI GPU: {err:#}"),
+            },
+            Err(err) => warn!("Could not read NVIDIA PCI information for NVAPI: {err:#}"),
+        },
+        Err(err) => warn!("NVAPI is unavailable: {err:#}"),
+    }
+
     Ok(ClocksInfo {
         table: Some(ClocksTable::Nvidia(NvidiaClocksTable {
             gpu_offsets,
@@ -324,56 +352,257 @@ fn device_clocks_info(id: &str) -> anyhow::Result<ClocksInfo> {
             vram_locked_clocks: None,
             gpu_clock_range,
             vram_clock_range,
-            gpu_vf_curve: vec![],
-            voltage_boost: None,
+            gpu_vf_curve,
+            voltage_boost,
         })),
         ..Default::default()
     })
 }
 
 fn set_clocks_value(id: &str, command: &SetClocksCommand) -> anyhow::Result<u64> {
+    batch_set_clocks_value(id, std::slice::from_ref(command))
+}
+
+#[allow(clippy::cast_sign_loss)]
+fn batch_set_clocks_value(id: &str, commands: &[SetClocksCommand]) -> anyhow::Result<u64> {
     let nvml = init_nvml()?;
     let mut device = device_from_id(&nvml, id)?;
 
-    match command.r#type {
-        ClockspeedType::GpuClockOffset(state) | ClockspeedType::MemClockOffset(state) => {
-            let performance_state = PerformanceState::try_from(state)
-                .map_err(|_| anyhow!("Invalid NVIDIA performance state {state}"))?;
-            let clock = if matches!(command.r#type, ClockspeedType::GpuClockOffset(_)) {
-                Clock::Graphics
-            } else {
-                Clock::Memory
-            };
-            let offset = command.value.unwrap_or(0);
-            device
-                .set_clock_offset(clock, performance_state, offset)
-                .with_context(|| {
-                    format!(
-                        "Could not set NVIDIA {clock:?} offset {offset} MHz for P-state {state}"
-                    )
+    let nvapi = NvApi::new().ok();
+    let nvapi_handle = nvapi.as_ref().and_then(|api| {
+        let pci = device.pci_info().ok()?;
+        api.find_matching_gpu(pci.bus).ok().flatten()
+    });
+
+    // Reset is intentionally processed before any values in the same batch. That
+    // makes "reset then apply profile" deterministic and gives the GUI one atomic
+    // request for all tuning controls.
+    if commands
+        .iter()
+        .any(|command| matches!(command.r#type, ClockspeedType::Reset))
+    {
+        reset_all_clocks(&mut device, nvapi.as_ref(), nvapi_handle);
+    }
+
+    let mut min_core: Option<Option<i32>> = None;
+    let mut max_core: Option<Option<i32>> = None;
+    let mut min_memory: Option<Option<i32>> = None;
+    let mut max_memory: Option<Option<i32>> = None;
+
+    for command in commands {
+        match command.r#type {
+            ClockspeedType::MinCoreClock => min_core = Some(command.value),
+            ClockspeedType::MaxCoreClock => max_core = Some(command.value),
+            ClockspeedType::MinMemoryClock => min_memory = Some(command.value),
+            ClockspeedType::MaxMemoryClock => max_memory = Some(command.value),
+            _ => {}
+        }
+    }
+
+    apply_gpu_clock_lock(&mut device, min_core, max_core)?;
+    apply_memory_clock_lock(&mut device, min_memory, max_memory)?;
+
+    for command in commands {
+        match command.r#type {
+            ClockspeedType::GpuClockOffset(state) | ClockspeedType::MemClockOffset(state) => {
+                let performance_state = PerformanceState::try_from(state)
+                    .map_err(|_| anyhow!("Invalid NVIDIA performance state {state}"))?;
+                let clock = if matches!(command.r#type, ClockspeedType::GpuClockOffset(_)) {
+                    Clock::Graphics
+                } else {
+                    Clock::Memory
+                };
+                let offset = command.value.unwrap_or(0);
+                let limits = device.clock_offset(clock, performance_state).with_context(|| {
+                    format!("Could not query NVIDIA {clock:?} offset range for P-state {state}")
                 })?;
-        }
-        ClockspeedType::Reset => {
-            if let Ok(states) = device.supported_performance_states() {
-                for state in states {
-                    for clock in [Clock::Graphics, Clock::Memory] {
-                        if device.clock_offset(clock, state).is_ok() {
-                            let _ = device.set_clock_offset(clock, state, 0);
-                        }
-                    }
-                }
+                ensure!(
+                    (limits.min_clock_offset_mhz..=limits.max_clock_offset_mhz).contains(&offset),
+                    "Requested NVIDIA {clock:?} offset {offset} MHz for P-state {state} is outside the driver range {}..={} MHz",
+                    limits.min_clock_offset_mhz,
+                    limits.max_clock_offset_mhz
+                );
+                device
+                    .set_clock_offset(clock, performance_state, offset)
+                    .with_context(|| {
+                        format!(
+                            "Could not set NVIDIA {clock:?} offset {offset} MHz for P-state {state}"
+                        )
+                    })?;
             }
-            let _ = device.reset_gpu_locked_clocks();
-            let _ = device.reset_mem_locked_clocks();
-        }
-        _ => {
-            return Err(anyhow!(
-                "This NVIDIA clock control requires Windows configuration-state support that is not implemented yet"
-            ));
+            ClockspeedType::GpuVfCurveClock(index) => {
+                let target = command
+                    .value
+                    .context("A target clock is required for an NVIDIA V/F point")?;
+                let api = nvapi
+                    .as_ref()
+                    .context("NVIDIA NVAPI is required for V/F curve control")?;
+                let handle = nvapi_handle.context("NVAPI could not match this NVIDIA GPU")?;
+                let (min_offset, max_offset) = graphics_offset_range(&device)
+                    .context("The NVIDIA driver did not expose a GPU clock offset range")?;
+                api.set_vf_point_clock(handle, index, target, min_offset, max_offset)
+                    .with_context(|| format!("Could not set NVIDIA V/F point {index} to {target} MHz"))?;
+            }
+            ClockspeedType::VoltageBoost => {
+                let percent = command.value.unwrap_or(0);
+                let api = nvapi
+                    .as_ref()
+                    .context("NVIDIA NVAPI is required for voltage boost control")?;
+                let handle = nvapi_handle.context("NVAPI could not match this NVIDIA GPU")?;
+                api.set_voltage_boost(handle, percent)?;
+            }
+            ClockspeedType::GpuVfCurveVoltage(_) => {
+                return Err(anyhow!(
+                    "NVIDIA V/F point voltage is read-only; change the point clock instead"
+                ));
+            }
+            ClockspeedType::MemVfCurveClock(_) | ClockspeedType::MemVfCurveVoltage(_) => {
+                return Err(anyhow!(
+                    "NVIDIA memory V/F curve editing is not exposed by this Windows NVAPI backend"
+                ));
+            }
+            ClockspeedType::MinVoltage
+            | ClockspeedType::MaxVoltage
+            | ClockspeedType::VoltageOffset => {
+                return Err(anyhow!(
+                    "Direct NVIDIA voltage control is not supported; the driver only exposes voltage boost and V/F frequency points"
+                ));
+            }
+            ClockspeedType::MinCoreClock
+            | ClockspeedType::MaxCoreClock
+            | ClockspeedType::MinMemoryClock
+            | ClockspeedType::MaxMemoryClock
+            | ClockspeedType::Reset => {}
         }
     }
 
     Ok(0)
+}
+
+fn apply_gpu_clock_lock(
+    device: &mut Device<'_>,
+    min: Option<Option<i32>>,
+    max: Option<Option<i32>>,
+) -> anyhow::Result<()> {
+    match (min, max) {
+        (None, None) => Ok(()),
+        (Some(None), Some(None)) => device
+            .reset_gpu_locked_clocks()
+            .context("Could not reset NVIDIA GPU clock lock"),
+        (Some(Some(min)), Some(Some(max))) => {
+            ensure!(min >= 0 && max >= 0, "GPU clock lock cannot be negative");
+            ensure!(min <= max, "Minimum GPU clock must not exceed maximum GPU clock");
+            if let Some((allowed_min, allowed_max)) = aggregate_clock_range(device, Clock::Graphics) {
+                ensure!(
+                    u32::try_from(min)? >= allowed_min && u32::try_from(max)? <= allowed_max,
+                    "Requested GPU clock range {min}..={max} MHz is outside the driver range {allowed_min}..={allowed_max} MHz"
+                );
+            }
+            device
+                .set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
+                    min_clock_mhz: u32::try_from(min)?,
+                    max_clock_mhz: u32::try_from(max)?,
+                })
+                .context("Could not set NVIDIA GPU clock range")
+        }
+        _ => Err(anyhow!(
+            "Minimum and maximum GPU clock must be supplied together"
+        )),
+    }
+}
+
+fn apply_memory_clock_lock(
+    device: &mut Device<'_>,
+    min: Option<Option<i32>>,
+    max: Option<Option<i32>>,
+) -> anyhow::Result<()> {
+    match (min, max) {
+        (None, None) => Ok(()),
+        (Some(None), Some(None)) => device
+            .reset_mem_locked_clocks()
+            .context("Could not reset NVIDIA memory clock lock"),
+        (Some(Some(min)), Some(Some(max))) => {
+            ensure!(min >= 0 && max >= 0, "Memory clock lock cannot be negative");
+            ensure!(
+                min <= max,
+                "Minimum memory clock must not exceed maximum memory clock"
+            );
+            if let Some((allowed_min, allowed_max)) = aggregate_clock_range(device, Clock::Memory) {
+                ensure!(
+                    u32::try_from(min)? >= allowed_min && u32::try_from(max)? <= allowed_max,
+                    "Requested memory clock range {min}..={max} MHz is outside the driver range {allowed_min}..={allowed_max} MHz"
+                );
+            }
+            device
+                .set_mem_locked_clocks(u32::try_from(min)?, u32::try_from(max)?)
+                .context("Could not set NVIDIA memory clock range")
+        }
+        _ => Err(anyhow!(
+            "Minimum and maximum memory clock must be supplied together"
+        )),
+    }
+}
+
+fn graphics_offset_range(device: &Device<'_>) -> Option<(i32, i32)> {
+    if let Ok(offset) = device.clock_offset(Clock::Graphics, PerformanceState::Zero) {
+        return Some((
+            offset.min_clock_offset_mhz,
+            offset.max_clock_offset_mhz,
+        ));
+    }
+
+    device
+        .supported_performance_states()
+        .ok()?
+        .into_iter()
+        .find_map(|state| {
+            device.clock_offset(Clock::Graphics, state).ok().map(|offset| {
+                (
+                    offset.min_clock_offset_mhz,
+                    offset.max_clock_offset_mhz,
+                )
+            })
+        })
+}
+
+fn aggregate_clock_range(device: &Device<'_>, clock: Clock) -> Option<(u32, u32)> {
+    let mut result: Option<(u32, u32)> = None;
+    for state in device.supported_performance_states().ok()? {
+        if let Ok((state_min, state_max)) = device.min_max_clock_of_pstate(clock, state) {
+            result = Some(match result {
+                Some((min, max)) => (cmp::min(min, state_min), cmp::max(max, state_max)),
+                None => (state_min, state_max),
+            });
+        }
+    }
+    result
+}
+
+fn reset_all_clocks(
+    device: &mut Device<'_>,
+    nvapi: Option<&NvApi>,
+    nvapi_handle: Option<*mut std::ffi::c_void>,
+) {
+    if let Ok(states) = device.supported_performance_states() {
+        for state in states {
+            for clock in [Clock::Graphics, Clock::Memory] {
+                if device.clock_offset(clock, state).is_ok() {
+                    let _ = device.set_clock_offset(clock, state, 0);
+                }
+            }
+        }
+    }
+    let _ = device.reset_gpu_locked_clocks();
+    let _ = device.reset_mem_locked_clocks();
+
+    if let (Some(api), Some(handle)) = (nvapi, nvapi_handle) {
+        if let Err(err) = api.reset_vf_curve(handle) {
+            warn!("Could not reset NVAPI V/F curve: {err:#}");
+        }
+        if let Err(err) = api.set_voltage_boost(handle, 0) {
+            warn!("Could not reset NVAPI voltage boost: {err:#}");
+        }
+    }
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
