@@ -78,6 +78,7 @@ jobs:
           ref: windows/platform-foundation-20260821
 
       - name: Set up MSYS2 GTK runtime
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -100,30 +101,39 @@ jobs:
 
       - name: Verify GNU target and GTK toolchain
         shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
           rustup target list --installed --toolchain 1.97.0
-          if (-not (Test-Path 'C:\msys64\mingw64\bin\pkgconf.exe')) { throw 'MSYS2 pkgconf.exe not found' }
-          & 'C:\msys64\mingw64\bin\pkgconf.exe' --version
-          & 'C:\msys64\mingw64\bin\pkgconf.exe' --modversion glib-2.0
-          & 'C:\msys64\mingw64\bin\pkgconf.exe' --modversion libadwaita-1
+          $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
+          $pkgconf = Join-Path $mingw 'bin\pkgconf.exe'
+          if (-not (Test-Path $pkgconf)) { throw "MSYS2 pkgconf.exe not found at $pkgconf" }
+          & $pkgconf --version
+          & $pkgconf --modversion glib-2.0
+          & $pkgconf --modversion libadwaita-1
 
       - name: Build GUI and daemon executables
         shell: pwsh
         env:
-          PKG_CONFIG: C:\msys64\mingw64\bin\pkgconf.exe
-          PKG_CONFIG_PATH: C:\msys64\mingw64\lib\pkgconfig;C:\msys64\mingw64\share\pkgconfig
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
           PKG_CONFIG_ALLOW_CROSS: '1'
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\mingw64\bin\gcc.exe
         run: |
-          $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\msys64\mingw64\bin;$env:PATH"
+          $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
+          $mingwBin = Join-Path $mingw 'bin'
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;$mingwBin;$env:PATH"
+          $env:PKG_CONFIG = Join-Path $mingwBin 'pkgconf.exe'
+          $env:PKG_CONFIG_PATH = "$(Join-Path $mingw 'lib\pkgconfig');$(Join-Path $mingw 'share\pkgconfig')"
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = Join-Path $mingwBin 'gcc.exe'
           cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia --bin lact --bin lact-gui-windows
 
       - name: Assemble portable GUI runtime
         shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $mingw = 'C:\msys64\mingw64'
+          $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
           $mingwBin = Join-Path $mingw 'bin'
           $dist = 'dist\lact-windows-gui-x86_64'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
