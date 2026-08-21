@@ -71,7 +71,7 @@ jobs:
           if-no-files-found: error
 
   preview-release:
-    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[windows-release]')
+    if: github.event_name == 'pull_request'
     needs:
       - client-check
       - daemon-check
@@ -81,6 +81,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.97'
@@ -110,7 +112,7 @@ jobs:
           gh release create $tag `
             .\dist\lact-windows-x86_64.exe `
             .\dist\lact-windows-x86_64.exe.sha256.txt `
-            --target "${{ github.sha }}" `
+            --target "${{ github.event.pull_request.head.sha }}" `
             --title "LACT Windows Preview ${{ github.run_number }}" `
             --prerelease `
             --notes "Experimental Windows x86_64 build from branch windows/platform-foundation-20260821. NVIDIA/NVML Windows backend; GUI is not included yet. Run the daemon elevated and use the CLI from the same executable."
