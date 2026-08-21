@@ -2,8 +2,29 @@
 
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
-    prepare_portable_runtime()?;
-    lact_gui::run(lact_schema::args::GuiArgs::default())
+    let bootstrap_log = bootstrap_log_path()?;
+    install_panic_logger(bootstrap_log.clone());
+    append_log(&bootstrap_log, "LACT Windows GUI bootstrap starting");
+
+    let result = (|| {
+        prepare_portable_runtime()?;
+        append_log(&bootstrap_log, "Portable GTK runtime environment prepared");
+        lact_gui::run(lact_schema::args::GuiArgs::default())
+    })();
+
+    match &result {
+        Ok(()) => append_log(&bootstrap_log, "LACT Windows GUI exited normally"),
+        Err(err) => {
+            append_log(&bootstrap_log, &format!("LACT Windows GUI failed: {err:#}"));
+            // This binary uses the Windows GUI subsystem, so there is no console
+            // to show an early startup error. Open the bootstrap log immediately.
+            let _ = std::process::Command::new("notepad.exe")
+                .arg(&bootstrap_log)
+                .spawn();
+        }
+    }
+
+    result
 }
 
 #[cfg(windows)]
@@ -45,6 +66,46 @@ fn prepare_portable_runtime() -> anyhow::Result<()> {
     set_path_env_if_exists("GDK_PIXBUF_MODULE_FILE", &loaders_cache);
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn bootstrap_log_path() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("LACT").join("logs");
+    std::fs::create_dir_all(&dir).context("Could not create the LACT log directory")?;
+    Ok(dir.join("bootstrap.log"))
+}
+
+#[cfg(windows)]
+fn append_log(path: &std::path::Path, message: &str) {
+    use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "[{timestamp}] {message}");
+    }
+}
+
+#[cfg(windows)]
+fn install_panic_logger(path: std::path::PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        append_log(&path, &format!("PANIC: {info}"));
+        previous(info);
+    }));
 }
 
 #[cfg(windows)]
