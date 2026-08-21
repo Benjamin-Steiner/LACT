@@ -246,6 +246,10 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn set_power_cap(&self, id: &str, cap: Option<f64>) -> anyhow::Result<u64> {
+        self.make_request(Request::SetPowerCap { id, cap }).await
+    }
+
     pub async fn set_clocks_value(
         &self,
         id: &str,
