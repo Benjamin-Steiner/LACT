@@ -1,6 +1,9 @@
 name: Windows preview release
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-release.yml'
   workflow_dispatch:
 
 permissions:
@@ -8,11 +11,13 @@ permissions:
 
 jobs:
   build-release:
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -44,10 +49,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "windows-preview-${{ github.run_number }}"
+          $target = "${{ github.event.pull_request.head.sha }}"
+          if ([string]::IsNullOrWhiteSpace($target)) { $target = "${{ github.sha }}" }
           gh release create $tag `
             .\dist\lact-windows-x86_64.exe `
             .\dist\lact-windows-x86_64.exe.sha256.txt `
-            --target "${{ github.sha }}" `
+            --target $target `
             --title "LACT Windows Preview ${{ github.run_number }}" `
             --prerelease `
-            --notes "Experimental Windows x86_64 build from branch windows/platform-foundation-20260821. Current Windows backend is NVIDIA/NVML focused and does not include the GTK GUI yet. Run the daemon elevated, then use the CLI from the same executable."
+            --notes "Experimental Windows x86_64 build from branch windows/platform-foundation-20260821. NVIDIA/NVML Windows backend; GUI is not included yet. Run the daemon elevated and use the CLI from the same executable."
