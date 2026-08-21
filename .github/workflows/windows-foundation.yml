@@ -1,0 +1,24 @@
+name: Windows foundation
+
+on:
+  push:
+    branches:
+      - windows/platform-foundation-20260821
+  pull_request:
+    paths:
+      - 'lact-client/**'
+      - 'lact-schema/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/windows-foundation.yml'
+
+jobs:
+  client-check:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97'
+      - name: Check schema and client
+        run: cargo check -p lact-schema -p lact-client
