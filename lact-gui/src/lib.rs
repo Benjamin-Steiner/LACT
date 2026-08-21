@@ -60,13 +60,50 @@ pub(crate) static I18N: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
 #[folder = "i18n"]
 pub struct Localizations;
 
-fn init_logging(args: &GuiArgs) -> anyhow::Result<()> {
-    let env_filter = EnvFilter::builder()
+fn log_filter(args: &GuiArgs) -> anyhow::Result<EnvFilter> {
+    EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .parse(args.log_level.as_deref().unwrap_or_default())
-        .context("Invalid log level")?;
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        .context("Invalid log level")
+}
+
+#[cfg(unix)]
+fn init_logging(args: &GuiArgs) -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter(args)?)
+        .init();
     Ok(())
+}
+
+#[cfg(windows)]
+fn init_logging(args: &GuiArgs) -> anyhow::Result<()> {
+    use std::{fs::OpenOptions, sync::Mutex};
+
+    let log_dir = windows_log_dir()?;
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("gui.log"))
+        .context("Could not open the LACT Windows GUI log")?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter(args)?)
+        .with_ansi(false)
+        .with_writer(Mutex::new(log_file))
+        .init();
+    tracing::info!("LACT Windows GUI logging initialized");
+    tracing::info!(log_directory = %log_dir.display(), "Windows diagnostic log directory");
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_log_dir() -> anyhow::Result<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("LACT").join("logs");
+    std::fs::create_dir_all(&dir).context("Could not create the LACT Windows log directory")?;
+    Ok(dir)
 }
 
 #[cfg(unix)]
