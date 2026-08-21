@@ -1,0 +1,129 @@
+name: Windows GUI preview release
+
+on:
+  push:
+    branches:
+      - windows/platform-foundation-20260821
+    paths:
+      - 'lact-gui/**'
+      - 'lact/**'
+      - 'lact-client/**'
+      - 'lact-schema/**'
+      - 'lact-daemon/**'
+      - '.github/workflows/windows-gui-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-gui-release:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[windows-gui-release]')
+    runs-on: windows-2025
+    timeout-minutes: 45
+
+    steps:
+      - name: Disable Git CRLF conversion
+        shell: pwsh
+        run: git config --global core.autocrlf input
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97'
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install GTK4 and libadwaita runtime/build dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gtk4
+            mingw-w64-x86_64-libadwaita
+
+      - name: Build LACT with GUI
+        shell: msys2 {0}
+        run: |
+          export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig:/mingw64/share/pkgconfig
+          cargo build --release -p lact --no-default-features --features lact-gui --target x86_64-pc-windows-gnu
+
+      - name: Assemble portable GUI package
+        shell: msys2 {0}
+        run: |
+          set -e
+          rm -rf dist
+          mkdir -p dist/LACT-Windows
+          cp target/x86_64-pc-windows-gnu/release/lact.exe dist/LACT-Windows/lact.exe
+
+          # Keep the preview self-contained. DLLs live next to the executable so
+          # the standard Windows DLL search path resolves GTK/libadwaita and
+          # their transitive dependencies without requiring MSYS2 on the user PC.
+          cp /mingw64/bin/*.dll dist/LACT-Windows/
+
+          mkdir -p dist/LACT-Windows/share/glib-2.0
+          cp -r /mingw64/share/glib-2.0/schemas dist/LACT-Windows/share/glib-2.0/
+
+          mkdir -p dist/LACT-Windows/share/icons
+          if [ -d /mingw64/share/icons/Adwaita ]; then
+            cp -r /mingw64/share/icons/Adwaita dist/LACT-Windows/share/icons/
+          fi
+          if [ -d /mingw64/share/icons/hicolor ]; then
+            cp -r /mingw64/share/icons/hicolor dist/LACT-Windows/share/icons/
+          fi
+
+          mkdir -p dist/LACT-Windows/lib
+          if [ -d /mingw64/lib/gdk-pixbuf-2.0 ]; then
+            cp -r /mingw64/lib/gdk-pixbuf-2.0 dist/LACT-Windows/lib/
+          fi
+          if [ -d /mingw64/lib/gtk-4.0 ]; then
+            cp -r /mingw64/lib/gtk-4.0 dist/LACT-Windows/lib/
+          fi
+
+          cat > dist/LACT-Windows/README-WINDOWS.txt <<'EOF'
+          LACT Windows GUI Preview
+          ========================
+
+          Double-click lact.exe to open the GUI.
+          The GUI automatically starts the local LACT Windows daemon in the background if needed.
+
+          Current Windows backend focus: NVIDIA through NVML.
+          Available functionality depends on NVIDIA driver/NVML support.
+          Some Linux-only pages/actions may be unavailable in this preview.
+
+          For GPU settings that require elevated driver access, close LACT and run lact.exe as Administrator.
+          EOF
+
+      - name: Create ZIP and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path .\dist\LACT-Windows -DestinationPath .\dist\lact-windows-gui-x86_64.zip -CompressionLevel Optimal
+          $hash = (Get-FileHash .\dist\lact-windows-gui-x86_64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  lact-windows-gui-x86_64.zip" | Set-Content -Encoding ascii .\dist\lact-windows-gui-x86_64.zip.sha256.txt
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lact-windows-gui-x86_64
+          path: |
+            dist/lact-windows-gui-x86_64.zip
+            dist/lact-windows-gui-x86_64.zip.sha256.txt
+          if-no-files-found: error
+
+      - name: Create GitHub GUI prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-gui-preview-${{ github.run_number }}"
+          gh release create $tag `
+            .\dist\lact-windows-gui-x86_64.zip `
+            .\dist\lact-windows-gui-x86_64.zip.sha256.txt `
+            --target "${{ github.sha }}" `
+            --title "LACT Windows GUI Preview ${{ github.run_number }}" `
+            --prerelease `
+            --notes "Experimental Windows GUI build. Extract the ZIP and double-click lact.exe. The existing LACT GTK4/libadwaita interface is included together with its Windows runtime DLLs. The local Windows daemon starts automatically. NVIDIA/NVML is currently the primary Windows backend."
