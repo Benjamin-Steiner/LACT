@@ -1,0 +1,258 @@
+name: Apply Windows GUI compatibility patch
+
+on:
+  push:
+    branches:
+      - windows/platform-foundation-20260821
+    paths:
+      - '.github/workflows/windows-gui-port-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: windows/platform-foundation-20260821
+          fetch-depth: 0
+
+      - name: Apply Windows GUI compatibility changes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f"Expected block not found: {label}")
+              return text.replace(old, new, 1)
+
+          app_path = Path('lact-gui/src/app.rs')
+          app = app_path.read_text()
+
+          app = replace_once(
+              app,
+              '''    config::WindowSize,
+              service_setup::{
+                  ServiceSetupDialog, ServiceSetupDialogParams,
+                  systemd::{self, connect_unit_proxy},
+              },
+          };
+          ''',
+              '''    config::WindowSize,
+          };
+          #[cfg(unix)]
+          use crate::service_setup::{
+              ServiceSetupDialog, ServiceSetupDialogParams,
+              systemd::{self, connect_unit_proxy},
+          };
+          ''',
+              'Unix service setup import',
+          )
+
+          app = replace_once(
+              app,
+              '''use std::{
+              cell::Cell, fs, os::unix::net::UnixStream, path::PathBuf, rc::Rc, sync::Arc, time::Duration,
+          };
+          ''',
+              '''use std::{cell::Cell, fs, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+          #[cfg(unix)]
+          use std::os::unix::net::UnixStream;
+          ''',
+              'UnixStream import',
+          )
+
+          app = replace_once(
+              app,
+              '    service_setup_dialog: Option<AsyncController<ServiceSetupDialog>>,\n',
+              '    #[cfg(unix)]\n    service_setup_dialog: Option<AsyncController<ServiceSetupDialog>>,\n',
+              'service setup field',
+          )
+
+          app = replace_once(
+              app,
+              '''        if !system_info.version.is_current() && !daemon_config_shown {
+              sender.input(AppMsg::ShowServiceSetupDialog);
+          }
+          ''',
+              '''        #[cfg(unix)]
+          if !system_info.version.is_current() && !daemon_config_shown {
+              sender.input(AppMsg::ShowServiceSetupDialog);
+          }
+          ''',
+              'version mismatch service setup',
+          )
+
+          app = replace_once(
+              app,
+              '            service_setup_dialog: None,\n',
+              '            #[cfg(unix)]\n            service_setup_dialog: None,\n',
+              'service setup model init',
+          )
+
+          old_handler = '''            AppMsg::ShowServiceSetupDialog => {
+              let (manager_proxy, unit_proxy) = systemd::connect_unit_proxy().await?;
+
+              let params = ServiceSetupDialogParams {
+                  parent: root.clone().upcast(),
+                  initial_client: Ok((self.daemon_client.clone(), self.system_info.clone())),
+                  manager_proxy,
+                  unit_proxy,
+              };
+              let controller = ServiceSetupDialog::builder()
+                  .launch(params)
+                  .forward(sender.input_sender(), |_| AppMsg::ServiceSetupDialogClosed);
+              self.service_setup_dialog = Some(controller);
+          }
+          AppMsg::ServiceSetupDialogClosed => {
+              self.service_setup_dialog = None;
+          }
+          '''
+          new_handler = '''            #[cfg(unix)]
+          AppMsg::ShowServiceSetupDialog => {
+              let (manager_proxy, unit_proxy) = systemd::connect_unit_proxy().await?;
+
+              let params = ServiceSetupDialogParams {
+                  parent: root.clone().upcast(),
+                  initial_client: Ok((self.daemon_client.clone(), self.system_info.clone())),
+                  manager_proxy,
+                  unit_proxy,
+              };
+              let controller = ServiceSetupDialog::builder()
+                  .launch(params)
+                  .forward(sender.input_sender(), |_| AppMsg::ServiceSetupDialogClosed);
+              self.service_setup_dialog = Some(controller);
+          }
+          #[cfg(windows)]
+          AppMsg::ShowServiceSetupDialog => {
+              sender.input(AppMsg::Error(anyhow!(
+                  "On Windows, LACT starts its local daemon automatically. Windows Service installation is not implemented in this preview yet."
+              ).into()));
+          }
+          #[cfg(unix)]
+          AppMsg::ServiceSetupDialogClosed => {
+              self.service_setup_dialog = None;
+          }
+          #[cfg(windows)]
+          AppMsg::ServiceSetupDialogClosed => {}
+          '''
+          app = replace_once(app, old_handler, new_handler, 'service setup match arms')
+
+          app = replace_once(
+              app,
+              '''async fn create_connection(
+          ''',
+              '''#[cfg(unix)]
+          async fn create_connection(
+          ''',
+              'Unix create_connection cfg',
+          )
+
+          app = replace_once(
+              app,
+              '''async fn create_embedded_connection() -> anyhow::Result<DaemonClient> {
+          ''',
+              '''#[cfg(unix)]
+          async fn create_embedded_connection() -> anyhow::Result<DaemonClient> {
+          ''',
+              'Unix embedded daemon cfg',
+          )
+
+          marker = 'new_action_group!(pub AppActionGroup, "app");\n'
+          windows_impl = r'''#[cfg(windows)]
+          async fn create_connection(
+              _root: &adw::ApplicationWindow,
+              sender: &relm4::AsyncComponentSender<AppModel>,
+          ) -> (DaemonClient, bool) {
+              match DaemonClient::connect().await {
+                  Ok(client) => (client, false),
+                  Err(connect_err) => match create_embedded_connection().await {
+                      Ok(client) => (client, true),
+                      Err(start_err) => {
+                          sender.input(AppMsg::Error(anyhow!(
+                              "Could not connect to the LACT Windows daemon: {connect_err:#}\nCould not start the bundled daemon: {start_err:#}"
+                          ).into()));
+                          panic!("Could not start LACT Windows daemon: {start_err:#}");
+                      }
+                  },
+              }
+          }
+
+          #[cfg(windows)]
+          async fn create_embedded_connection() -> anyhow::Result<DaemonClient> {
+              use std::{os::windows::process::CommandExt as _, process::Command};
+
+              const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+              let exe = std::env::current_exe().context("Could not locate the LACT executable")?;
+
+              Command::new(exe)
+                  .arg("daemon")
+                  .creation_flags(CREATE_NO_WINDOW)
+                  .spawn()
+                  .context("Could not launch the LACT Windows daemon")?;
+
+              let mut last_error = None;
+              for _ in 0..50 {
+                  sleep(Duration::from_millis(100)).await;
+                  match DaemonClient::connect_with_reconnect(false).await {
+                      Ok(client) => return Ok(client),
+                      Err(err) => last_error = Some(err),
+                  }
+              }
+
+              Err(last_error.unwrap_or_else(|| anyhow!("LACT Windows daemon did not become ready")))
+          }
+
+          '''
+          if marker not in app:
+              raise SystemExit('Expected action-group marker not found')
+          app = app.replace(marker, windows_impl + marker, 1)
+          app_path.write_text(app)
+
+          cargo_path = Path('lact-gui/Cargo.toml')
+          cargo = cargo_path.read_text()
+          cargo = replace_once(
+              cargo,
+              'lact-daemon = { path = "../lact-daemon", default-features = false }\n',
+              '',
+              'general lact-daemon dependency',
+          )
+          cargo = replace_once(
+              cargo,
+              'zbus = { workspace = true }\n\nplotters',
+              'plotters',
+              'general zbus dependency',
+          )
+          cargo = replace_once(
+              cargo,
+              '\n[dev-dependencies]\n',
+              '''
+          [target.'cfg(unix)'.dependencies]
+          lact-daemon = { path = "../lact-daemon", default-features = false }
+          zbus = { workspace = true }
+
+          [dev-dependencies]
+          ''',
+              'Unix target dependencies',
+          )
+          cargo_path.write_text(cargo)
+          PY
+
+          cargo fmt --all
+
+      - name: Commit compatibility patch
+        shell: bash
+        run: |
+          git config user.name "Benjamin Steiner"
+          git config user.email "60236447+Benjamin-Steiner@users.noreply.github.com"
+          git add lact-gui/src/app.rs lact-gui/src/lib.rs lact-gui/Cargo.toml
+          if git diff --cached --quiet; then
+            echo "No compatibility changes to commit."
+            exit 0
+          fi
+          git commit -m "gui: [windows-gui-release] enable Windows GUI preview"
+          git push origin HEAD:windows/platform-foundation-20260821
