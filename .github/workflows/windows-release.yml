@@ -2,9 +2,9 @@ name: Windows NVIDIA tuning preview
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     branches:
-      - windows/platform-foundation-20260821
+      - master
     paths:
       - '.github/workflows/windows-release.yml'
 
@@ -95,6 +95,16 @@ jobs:
           $backendHash = (Get-FileHash "$dist\lact.exe" -Algorithm SHA256).Hash
           if ($guiHash -eq $backendHash) { throw 'GUI and backend unexpectedly contain identical binaries' }
 
+          $objdump = Join-Path $mingwBin 'objdump.exe'
+          $guiHeaders = (& $objdump -p "$dist\LACT-GUI.exe" 2>$null) -join "`n"
+          $backendHeaders = (& $objdump -p "$dist\lact.exe" 2>$null) -join "`n"
+          if ($guiHeaders -notmatch 'Subsystem\s+00000002\s+\(Windows GUI\)') {
+            throw 'LACT-GUI.exe is not a Windows GUI-subsystem binary'
+          }
+          if ($backendHeaders -notmatch 'Subsystem\s+00000003\s+\(Windows CUI\)') {
+            throw 'lact.exe is not a Windows console/backend binary'
+          }
+
           $copyTrees = @(
             @{ Source = "$mingw\share\glib-2.0\schemas"; Destination = "$dist\share\glib-2.0\schemas" },
             @{ Source = "$mingw\share\icons\Adwaita"; Destination = "$dist\share\icons\Adwaita" },
@@ -120,7 +130,6 @@ jobs:
 
           # Copy the transitive MinGW DLL dependencies required by the GUI,
           # backend and GTK runtime modules. Windows system DLLs are ignored.
-          $objdump = Join-Path $mingwBin 'objdump.exe'
           $queue = [System.Collections.Generic.Queue[string]]::new()
           $seen = @{}
           $queue.Enqueue((Resolve-Path "$dist\LACT-GUI.exe").Path)
