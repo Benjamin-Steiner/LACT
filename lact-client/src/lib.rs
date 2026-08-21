@@ -259,6 +259,15 @@ impl DaemonClient {
             .await
     }
 
+    pub async fn batch_set_clocks_value(
+        &self,
+        id: &str,
+        commands: Vec<SetClocksCommand>,
+    ) -> anyhow::Result<u64> {
+        self.make_request(Request::BatchSetClocksValue { id, commands })
+            .await
+    }
+
     pub async fn set_profile_rule(
         &self,
         name: String,
