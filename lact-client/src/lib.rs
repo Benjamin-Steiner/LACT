@@ -8,7 +8,10 @@ use lact_schema::{
     config::{GpuConfig, Profile, ProfileHooks},
 };
 
+#[cfg(unix)]
 use amdgpu_sysfs::gpu_handle::power_profile_mode::PowerProfileModesTable;
+#[cfg(windows)]
+type PowerProfileModesTable = serde_json::Value;
 use anyhow::Context;
 use connection::{DaemonConnection, tcp::TcpConnection};
 #[cfg(unix)]
@@ -228,8 +231,7 @@ impl DaemonClient {
     }
 
     pub async fn evaluate_profile_rule(&self, rule: ProfileRule) -> anyhow::Result<bool> {
-        self.make_request(Request::EvaluateProfileRule { rule })
-            .await
+        self.make_request(Request::EvaluateProfileRule { rule }).await
     }
 
     pub async fn get_gpu_config(&self, id: &str) -> anyhow::Result<Option<GpuConfig>> {
@@ -264,8 +266,7 @@ impl DaemonClient {
     }
 
     pub async fn confirm_pending_config(&self, command: ConfirmCommand) -> anyhow::Result<()> {
-        self.make_request(Request::ConfirmPendingConfig(command))
-            .await
+        self.make_request(Request::ConfirmPendingConfig(command)).await
     }
 }
 
