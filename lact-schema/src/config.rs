@@ -1,11 +1,14 @@
+#[path = "platform_types.rs"]
+mod platform_types;
+
 use indexmap::IndexMap;
 use nvml_wrapper::enums::device::PowerMizerMode;
+use platform_types::{PerformanceLevel, PowerLevelKind};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
 use crate::{
     FanControlMode, FanCurveMap, NvidiaThermalOptions, PmfwOptions, ProfileRule, default_fan_curve,
-    platform_types::{PerformanceLevel, PowerLevelKind},
     request::{ClockspeedType, SetClocksCommand},
 };
 
