@@ -46,7 +46,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.97'
+          toolchain: '1.97.0'
 
       - name: Build headless release executable
         run: cargo build --release -p lact --no-default-features --bin lact
@@ -95,8 +95,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.97'
+          toolchain: '1.97.0'
           targets: x86_64-pc-windows-gnu
+
+      - name: Verify GNU target
+        shell: pwsh
+        run: |
+          rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
+          rustup target list --installed --toolchain 1.97.0
 
       - name: Build GUI and daemon executables
         shell: pwsh
@@ -182,8 +188,8 @@ jobs:
           }
 
           @'
-          LACT Windows GUI Preview
-          ========================
+          LACT Windows NVIDIA Tuning Preview
+          ==================================
 
           Start LACT.exe. Do not start lact.exe directly unless you want the CLI.
 
@@ -192,19 +198,18 @@ jobs:
           only permits with elevation, right-click LACT.exe and choose
           "Run as administrator".
 
-          Current Windows functionality:
-          - NVIDIA GPU detection through NVML
-          - live temperature, utilization, VRAM, clocks, power and fan telemetry
-          - NVIDIA power-limit control when the driver exposes it
-          - NVIDIA GPU/memory clock offsets when the driver exposes writable P-states
-          - reset clock offsets
+          Current Windows v1 functionality:
+          - NVIDIA GPU detection and live telemetry through NVML
+          - core clock offset across editable NVAPI V/F points, with NVML P-state fallback
+          - memory clock offset across every writable NVIDIA memory P-state
+          - minimum/maximum GPU locked clocks
+          - minimum/maximum memory locked clocks
+          - NVAPI voltage boost when exposed by the driver
+          - NVIDIA power-limit control
+          - Reset All for clock offsets, V/F curve, clock locks and voltage boost
 
-          Still being ported:
-          - fan-curve writes
-          - profiles/process switching
-          - Windows Service installation
-          - NVAPI V/F curve editing
-          - AMD ADLX and Intel IGCL backends
+          Direct V/F point voltage editing is intentionally disabled because the
+          NVIDIA driver exposes those point voltages as immutable on this path.
 
           This is an experimental unsigned preview, so Windows SmartScreen may
           display an Unknown Publisher warning.
@@ -315,6 +320,6 @@ jobs:
             dist/lact-windows-headless-x86_64.exe.sha256.txt \
             --repo "${{ github.repository }}" \
             --target "windows/platform-foundation-20260821" \
-            --title "LACT Windows Preview ${{ github.run_number }}" \
+            --title "LACT Windows NVIDIA Tuning Preview ${{ github.run_number }}" \
             --prerelease \
-            --notes "Experimental Windows x86_64 build. Recommended download: LACT-Windows-GUI-Preview-Setup.exe. It installs the GTK/libadwaita GUI plus the local daemon/CLI runtime. The portable GUI ZIP contains LACT.exe (GUI) and lact.exe (daemon/CLI). Current Windows backend is NVIDIA/NVML focused."
+            --notes "Recommended download: LACT-Windows-GUI-Preview-Setup.exe. Windows v1 includes the GUI, live NVIDIA telemetry, core offset through native NVAPI V/F points with NVML P-state fallback, memory offsets across writable P-states, GPU/memory min-max clock locks, NVAPI voltage boost, power limit, and reset-all. Direct V/F voltage editing remains read-only."
