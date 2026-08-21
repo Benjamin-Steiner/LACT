@@ -1,4 +1,4 @@
-name: Windows NVIDIA tuning preview
+name: Windows NVIDIA safe GUI preview
 
 on:
   workflow_dispatch:
@@ -24,6 +24,20 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: windows/platform-foundation-20260821
+
+      - name: Verify fail-closed Windows source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Select-String -Path .\lact-gui\src\lib.rs -Pattern 'windows_app_safe::WindowsApp' -Quiet)) {
+            throw 'Windows release is not wired to the monitoring-only safe GUI'
+          }
+          if (-not (Select-String -Path .\lact-client\src\lib.rs -Pattern 'I_UNDERSTAND_THIS_IS_EXPERIMENTAL' -Quiet)) {
+            throw 'Windows client GPU-write guard is missing'
+          }
+          if (Select-String -Path .\lact-gui\src\windows_app_safe.rs -Pattern 'set_power_cap|set_clocks_value|batch_set_clocks_value|set_gpu_config' -Quiet) {
+            throw 'Safe Windows GUI unexpectedly contains a GPU write call'
+          }
 
       - name: Set up MSYS2 GTK runtime
         id: msys2
@@ -66,12 +80,9 @@ jobs:
           & $env:PKG_CONFIG --modversion glib-2.0
           & $env:PKG_CONFIG --modversion libadwaita-1
 
-          # Build the dedicated Windows-subsystem GUI binary first.
           cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia --bin lact-gui-windows
           Copy-Item .\target\x86_64-pc-windows-gnu\release\lact-gui-windows.exe .\target\x86_64-pc-windows-gnu\release\LACT-GUI.exe -Force
 
-          # Build the daemon/CLI separately without the GUI feature. The GUI
-          # expects a sibling named lact.exe and starts it with the daemon command.
           cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features nvidia --bin lact
 
       - name: Assemble portable runtime
@@ -82,13 +93,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
           $mingwBin = Join-Path $mingw 'bin'
-          $dist = 'dist\LACT-Windows-NVIDIA-Tuning'
+          $dist = 'dist\LACT-Windows-NVIDIA-Safe-Preview'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
           Copy-Item .\target\x86_64-pc-windows-gnu\release\LACT-GUI.exe "$dist\LACT-GUI.exe"
           Copy-Item .\target\x86_64-pc-windows-gnu\release\lact.exe "$dist\lact.exe"
 
-          # Sanity check: these MUST remain two separate files on Windows.
           if (-not (Test-Path "$dist\LACT-GUI.exe")) { throw 'LACT-GUI.exe missing' }
           if (-not (Test-Path "$dist\lact.exe")) { throw 'lact.exe backend missing' }
           $guiHash = (Get-FileHash "$dist\LACT-GUI.exe" -Algorithm SHA256).Hash
@@ -128,8 +138,6 @@ jobs:
             Copy-Item $queryLoaders "$dist\gdk-pixbuf-query-loaders.exe"
           }
 
-          # Copy the transitive MinGW DLL dependencies required by the GUI,
-          # backend and GTK runtime modules. Windows system DLLs are ignored.
           $queue = [System.Collections.Generic.Queue[string]]::new()
           $seen = @{}
           $queue.Enqueue((Resolve-Path "$dist\LACT-GUI.exe").Path)
@@ -160,49 +168,48 @@ jobs:
           }
 
           @'
-          LACT Windows NVIDIA Tuning Preview
-          ==================================
+          LACT Windows NVIDIA Safe Preview
+          ================================
 
           Start LACT-GUI.exe.
 
-          lact.exe is the local backend/CLI and is started automatically by the
-          GUI. Do not use lact.exe as the desktop application.
+          lact.exe is the local backend/CLI and is started automatically by the GUI.
 
-          Windows v1 controls:
-          - live NVIDIA telemetry through NVML
-          - core clock offset through native NVIDIA NVAPI V/F points, with NVML fallback
-          - memory clock offset across writable memory P-states
-          - GPU minimum/maximum locked clocks
-          - memory minimum/maximum locked clocks
-          - NVAPI voltage boost when exposed by the driver
-          - NVIDIA power limit
-          - reset of clock offsets, V/F curve, locks and voltage boost
+          Safety behavior:
+          - the compiled GUI is monitoring-only and contains no GPU write calls
+          - lact-client blocks GPU-changing requests on Windows by default
+          - clocks, voltage, fan, power limit, profiles and driver state are not changed
+          - live NVIDIA telemetry is read through NVML once per second
 
-          If a driver write requires elevation, close LACT and run LACT-GUI.exe
-          as Administrator.
+          Diagnostics:
+          %LOCALAPPDATA%\LACT\logs\bootstrap.log
+          %LOCALAPPDATA%\LACT\logs\gui.log
+          %LOCALAPPDATA%\LACT\logs\daemon.log
+
+          Use the Logs button in the GUI to open that directory.
           '@ | Set-Content -Encoding utf8 "$dist\README-WINDOWS.txt"
 
       - name: Build installer and portable ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = 'dist\LACT-Windows-NVIDIA-Tuning'
-          $zip = '.\dist\LACT-Windows-NVIDIA-Tuning-Portable.zip'
-          $setup = '.\dist\LACT-Windows-NVIDIA-Tuning-Setup.exe'
+          $dist = 'dist\LACT-Windows-NVIDIA-Safe-Preview'
+          $zip = '.\dist\LACT-Windows-NVIDIA-Safe-Preview-Portable.zip'
+          $setup = '.\dist\LACT-Windows-NVIDIA-Safe-Preview-Setup.exe'
 
           Compress-Archive -Path "$dist\*" -DestinationPath $zip -CompressionLevel Optimal -Force
 
           $iss = @'
           [Setup]
-          AppId=LACT-Windows-NVIDIA-Tuning-Preview
-          AppName=LACT Windows NVIDIA Tuning Preview
+          AppId=LACT-Windows-NVIDIA-Safe-Preview
+          AppName=LACT Windows NVIDIA Safe Preview
           AppVersion=0.10.1-preview
           AppPublisher=LACT Windows Port
-          DefaultDirName={localappdata}\Programs\LACT Windows NVIDIA Tuning Preview
-          DefaultGroupName=LACT Windows NVIDIA Tuning Preview
+          DefaultDirName={localappdata}\Programs\LACT Windows NVIDIA Safe Preview
+          DefaultGroupName=LACT Windows NVIDIA Safe Preview
           UninstallDisplayIcon={app}\LACT-GUI.exe
           OutputDir=dist
-          OutputBaseFilename=LACT-Windows-NVIDIA-Tuning-Setup
+          OutputBaseFilename=LACT-Windows-NVIDIA-Safe-Preview-Setup
           Compression=lzma2
           SolidCompression=yes
           WizardStyle=modern
@@ -214,14 +221,14 @@ jobs:
           Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
           [Files]
-          Source: "dist\LACT-Windows-NVIDIA-Tuning\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+          Source: "dist\LACT-Windows-NVIDIA-Safe-Preview\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
-          Name: "{group}\LACT Windows NVIDIA Tuning"; Filename: "{app}\LACT-GUI.exe"
-          Name: "{autodesktop}\LACT Windows NVIDIA Tuning"; Filename: "{app}\LACT-GUI.exe"; Tasks: desktopicon
+          Name: "{group}\LACT Windows NVIDIA Safe Preview"; Filename: "{app}\LACT-GUI.exe"
+          Name: "{autodesktop}\LACT Windows NVIDIA Safe Preview"; Filename: "{app}\LACT-GUI.exe"; Tasks: desktopicon
 
           [Run]
-          Filename: "{app}\LACT-GUI.exe"; Description: "Launch LACT Windows NVIDIA Tuning"; Flags: nowait postinstall skipifsilent
+          Filename: "{app}\LACT-GUI.exe"; Description: "Launch LACT Windows NVIDIA Safe Preview"; Flags: nowait postinstall skipifsilent
           '@
           $iss | Set-Content -Encoding ascii .\windows-gui-preview.iss
 
@@ -245,16 +252,16 @@ jobs:
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $([IO.Path]::GetFileName($file))"
           }
-          $checksumLines | Set-Content -Encoding ascii .\dist\LACT-Windows-NVIDIA-Tuning.sha256.txt
+          $checksumLines | Set-Content -Encoding ascii .\dist\LACT-Windows-NVIDIA-Safe-Preview.sha256.txt
 
       - name: Upload GUI package
         uses: actions/upload-artifact@v4
         with:
-          name: LACT-Windows-NVIDIA-Tuning
+          name: LACT-Windows-NVIDIA-Safe-Preview
           path: |
-            dist/LACT-Windows-NVIDIA-Tuning-Setup.exe
-            dist/LACT-Windows-NVIDIA-Tuning-Portable.zip
-            dist/LACT-Windows-NVIDIA-Tuning.sha256.txt
+            dist/LACT-Windows-NVIDIA-Safe-Preview-Setup.exe
+            dist/LACT-Windows-NVIDIA-Safe-Preview-Portable.zip
+            dist/LACT-Windows-NVIDIA-Safe-Preview.sha256.txt
           if-no-files-found: error
 
       - name: Create GitHub prerelease
@@ -264,11 +271,11 @@ jobs:
         run: |
           $tag = "windows-gui-preview-${{ github.run_number }}"
           gh release create $tag `
-            .\dist\LACT-Windows-NVIDIA-Tuning-Setup.exe `
-            .\dist\LACT-Windows-NVIDIA-Tuning-Portable.zip `
-            .\dist\LACT-Windows-NVIDIA-Tuning.sha256.txt `
+            .\dist\LACT-Windows-NVIDIA-Safe-Preview-Setup.exe `
+            .\dist\LACT-Windows-NVIDIA-Safe-Preview-Portable.zip `
+            .\dist\LACT-Windows-NVIDIA-Safe-Preview.sha256.txt `
             --repo "${{ github.repository }}" `
             --target "windows/platform-foundation-20260821" `
-            --title "LACT Windows NVIDIA Tuning Preview ${{ github.run_number }}" `
+            --title "LACT Windows NVIDIA Safe Preview ${{ github.run_number }}" `
             --prerelease `
-            --notes "Download LACT-Windows-NVIDIA-Tuning-Setup.exe. This build contains a dedicated windowed LACT-GUI.exe plus a separate lact.exe backend, fixing the previous Windows filename collision. v1 exposes NVIDIA telemetry, NVAPI core V/F clock offset, memory offset, GPU/memory clock locks, voltage boost, power limit and reset controls from the GUI."
+            --notes "Monitoring-only Windows preview. LACT-GUI.exe opens a real GUI and starts the separate lact.exe backend. GPU-changing requests are blocked by default in lact-client, and the compiled GUI contains no clock/power/voltage/fan/profile write calls. Logs are written to %LOCALAPPDATA%\\LACT\\logs (bootstrap.log, gui.log and daemon.log)."
