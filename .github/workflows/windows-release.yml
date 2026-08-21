@@ -45,7 +45,7 @@ jobs:
           toolchain: '1.97'
 
       - name: Build headless release executable
-        run: cargo build --release -p lact --no-default-features
+        run: cargo build --release -p lact --no-default-features --bin lact
 
       - name: Prepare headless release files
         shell: pwsh
@@ -66,7 +66,7 @@ jobs:
 
   build-gui-release:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -80,9 +80,12 @@ jobs:
           update: true
           install: >-
             mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-gtk4
             mingw-w64-x86_64-libadwaita
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-fontconfig
             mingw-w64-x86_64-gsettings-desktop-schemas
             mingw-w64-x86_64-hicolor-icon-theme
 
@@ -91,53 +94,195 @@ jobs:
           toolchain: '1.97'
           targets: x86_64-pc-windows-gnu
 
-      - name: Build GUI release executable
+      - name: Build GUI and daemon executables
         shell: pwsh
         env:
           PATH: C:\msys64\mingw64\bin;${{ env.PATH }}
           PKG_CONFIG_PATH: C:\msys64\mingw64\lib\pkgconfig;C:\msys64\mingw64\share\pkgconfig
           PKG_CONFIG_ALLOW_CROSS: '1'
-        run: cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia
+        run: >-
+          cargo build --release -p lact --target x86_64-pc-windows-gnu
+          --no-default-features --features lact-gui,nvidia
+          --bin lact --bin lact-gui-windows
 
-      - name: Bundle GUI executable and GTK runtime
+      - name: Assemble portable GUI runtime
         shell: pwsh
         run: |
-          $dist = "dist\lact-windows-gui-x86_64"
+          $ErrorActionPreference = 'Stop'
+          $mingw = 'C:\msys64\mingw64'
+          $mingwBin = Join-Path $mingw 'bin'
+          $dist = 'dist\lact-windows-gui-x86_64'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          # LACT.exe is the windowed launcher. lact.exe is the daemon/CLI process
+          # that the GUI starts automatically through the local named pipe.
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\lact-gui-windows.exe "$dist\LACT.exe"
           Copy-Item .\target\x86_64-pc-windows-gnu\release\lact.exe "$dist\lact.exe"
 
-          $dlls = @(
-            'libgtk-4-1.dll','libadwaita-1-0.dll','libglib-2.0-0.dll','libgio-2.0-0.dll','libgobject-2.0-0.dll',
-            'libgdk_pixbuf-2.0-0.dll','libpango-1.0-0.dll','libpangocairo-1.0-0.dll','libcairo-2.dll',
-            'libgraphene-1.0-0.dll','libharfbuzz-0.dll','libfribidi-0.dll','libfontconfig-1.dll','libfreetype-6.dll',
-            'libepoxy-0.dll','libintl-8.dll','libiconv-2.dll','zlib1.dll','libgcc_s_seh-1.dll','libstdc++-6.dll',
-            'libwinpthread-1.dll'
+          # Runtime data used by GTK/libadwaita on a machine without MSYS2.
+          $copyTrees = @(
+            @{ Source = "$mingw\share\glib-2.0\schemas"; Destination = "$dist\share\glib-2.0\schemas" },
+            @{ Source = "$mingw\share\icons\Adwaita"; Destination = "$dist\share\icons\Adwaita" },
+            @{ Source = "$mingw\share\icons\hicolor"; Destination = "$dist\share\icons\hicolor" },
+            @{ Source = "$mingw\share\fontconfig"; Destination = "$dist\share\fontconfig" },
+            @{ Source = "$mingw\etc\fonts"; Destination = "$dist\etc\fonts" },
+            @{ Source = "$mingw\lib\gdk-pixbuf-2.0"; Destination = "$dist\lib\gdk-pixbuf-2.0" },
+            @{ Source = "$mingw\lib\gio\modules"; Destination = "$dist\lib\gio\modules" },
+            @{ Source = "$mingw\lib\gtk-4.0"; Destination = "$dist\lib\gtk-4.0" },
+            @{ Source = "$mingw\share\mime"; Destination = "$dist\share\mime" }
           )
-          foreach ($dll in $dlls) {
-            $src = "C:\msys64\mingw64\bin\$dll"
-            if (Test-Path $src) { Copy-Item $src $dist }
+          foreach ($tree in $copyTrees) {
+            if (Test-Path $tree.Source) {
+              New-Item -ItemType Directory -Force -Path (Split-Path $tree.Destination) | Out-Null
+              Copy-Item $tree.Source $tree.Destination -Recurse -Force
+            }
           }
 
-          if (Test-Path C:\msys64\mingw64\share\glib-2.0\schemas) {
-            New-Item -ItemType Directory -Force -Path "$dist\share\glib-2.0" | Out-Null
-            Copy-Item C:\msys64\mingw64\share\glib-2.0\schemas "$dist\share\glib-2.0\" -Recurse
-          }
-          if (Test-Path C:\msys64\mingw64\share\icons) {
-            New-Item -ItemType Directory -Force -Path "$dist\share" | Out-Null
-            Copy-Item C:\msys64\mingw64\share\icons "$dist\share\" -Recurse
+          $queryLoaders = Join-Path $mingwBin 'gdk-pixbuf-query-loaders.exe'
+          if (Test-Path $queryLoaders) {
+            Copy-Item $queryLoaders "$dist\gdk-pixbuf-query-loaders.exe"
           }
 
-          Compress-Archive -Path "$dist\*" -DestinationPath .\dist\lact-windows-gui-x86_64.zip -Force
-          $hash = (Get-FileHash .\dist\lact-windows-gui-x86_64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  lact-windows-gui-x86_64.zip" | Set-Content -Encoding ascii .\dist\lact-windows-gui-x86_64.zip.sha256.txt
+          # Recursively copy only MinGW DLL dependencies required by the two
+          # executables, GTK modules and pixbuf loaders. Windows system DLLs are
+          # ignored because they do not exist in the MinGW bin directory.
+          $objdump = Join-Path $mingwBin 'objdump.exe'
+          $queue = [System.Collections.Generic.Queue[string]]::new()
+          $seen = @{}
+          $queue.Enqueue((Resolve-Path "$dist\LACT.exe").Path)
+          $queue.Enqueue((Resolve-Path "$dist\lact.exe").Path)
+          if (Test-Path "$dist\gdk-pixbuf-query-loaders.exe") {
+            $queue.Enqueue((Resolve-Path "$dist\gdk-pixbuf-query-loaders.exe").Path)
+          }
+          Get-ChildItem "$dist\lib" -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object {
+            $queue.Enqueue($_.FullName)
+          }
+
+          while ($queue.Count -gt 0) {
+            $binary = $queue.Dequeue()
+            $deps = & $objdump -p $binary 2>$null |
+              Select-String '^\s*DLL Name:\s*(.+)$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+
+            foreach ($dep in $deps) {
+              $key = $dep.ToLowerInvariant()
+              if ($seen.ContainsKey($key)) { continue }
+              $seen[$key] = $true
+
+              $src = Join-Path $mingwBin $dep
+              if (-not (Test-Path $src)) { continue }
+
+              $dst = Join-Path $dist $dep
+              Copy-Item $src $dst -Force
+              $queue.Enqueue((Resolve-Path $dst).Path)
+            }
+          }
+
+          @'
+          LACT Windows GUI Preview
+          ========================
+
+          Start LACT.exe. Do not start lact.exe directly unless you want the CLI.
+
+          LACT.exe opens the Windows GUI and automatically starts lact.exe as the
+          local background daemon when needed. For NVIDIA settings that the driver
+          only permits with elevation, right-click LACT.exe and choose
+          "Run as administrator".
+
+          Current Windows functionality:
+          - NVIDIA GPU detection through NVML
+          - live temperature, utilization, VRAM, clocks, power and fan telemetry
+          - NVIDIA power-limit control when the driver exposes it
+          - NVIDIA GPU/memory clock offsets when the driver exposes writable P-states
+          - reset clock offsets
+
+          Still being ported:
+          - fan-curve writes
+          - profiles/process switching
+          - Windows Service installation
+          - NVAPI V/F curve editing
+          - AMD ADLX and Intel IGCL backends
+
+          This is an experimental unsigned preview, so Windows SmartScreen may
+          display an Unknown Publisher warning.
+          '@ | Set-Content -Encoding utf8 "$dist\README-WINDOWS.txt"
+
+      - name: Build portable ZIP and installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = 'dist\lact-windows-gui-x86_64'
+
+          Compress-Archive -Path "$dist\*" -DestinationPath .\dist\lact-windows-gui-x86_64.zip -CompressionLevel Optimal -Force
+
+          $iss = @'
+          [Setup]
+          AppId=LACT-Windows-Preview
+          AppName=LACT Windows Preview
+          AppVersion=0.10.1-preview
+          AppPublisher=LACT Windows Port
+          DefaultDirName={localappdata}\Programs\LACT Windows Preview
+          DefaultGroupName=LACT Windows Preview
+          UninstallDisplayIcon={app}\LACT.exe
+          OutputDir=dist
+          OutputBaseFilename=LACT-Windows-GUI-Preview-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          PrivilegesRequired=lowest
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Files]
+          Source: "dist\lact-windows-gui-x86_64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{group}\LACT Windows Preview"; Filename: "{app}\LACT.exe"
+          Name: "{autodesktop}\LACT Windows Preview"; Filename: "{app}\LACT.exe"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\LACT.exe"; Description: "Launch LACT Windows Preview"; Flags: nowait postinstall skipifsilent
+          '@
+          $iss | Set-Content -Encoding ascii .\windows-gui-preview.iss
+
+          $isccCandidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler was not found' }
+          & $iscc .\windows-gui-preview.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          $files = @(
+            '.\dist\lact-windows-gui-x86_64.zip',
+            '.\dist\LACT-Windows-GUI-Preview-Setup.exe'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw "Expected release file missing: $file" }
+          }
+
+          $checksumLines = foreach ($file in $files) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $checksumLines | Set-Content -Encoding ascii .\dist\lact-windows-gui-x86_64.sha256.txt
 
       - name: Upload GUI artifact
         uses: actions/upload-artifact@v4
         with:
           name: lact-windows-gui-x86_64
           path: |
+            dist/LACT-Windows-GUI-Preview-Setup.exe
             dist/lact-windows-gui-x86_64.zip
-            dist/lact-windows-gui-x86_64.zip.sha256.txt
+            dist/lact-windows-gui-x86_64.sha256.txt
           if-no-files-found: error
 
   publish-prerelease:
@@ -160,12 +305,13 @@ jobs:
         run: |
           tag="windows-preview-${{ github.run_number }}"
           gh release create "$tag" \
+            dist/LACT-Windows-GUI-Preview-Setup.exe \
+            dist/lact-windows-gui-x86_64.zip \
+            dist/lact-windows-gui-x86_64.sha256.txt \
             dist/lact-windows-headless-x86_64.exe \
             dist/lact-windows-headless-x86_64.exe.sha256.txt \
-            dist/lact-windows-gui-x86_64.zip \
-            dist/lact-windows-gui-x86_64.zip.sha256.txt \
             --repo "${{ github.repository }}" \
             --target "windows/platform-foundation-20260821" \
             --title "LACT Windows Preview ${{ github.run_number }}" \
             --prerelease \
-            --notes "Experimental Windows x86_64 build from branch windows/platform-foundation-20260821. GUI ZIP includes the Windows GTK/libadwaita preview app. Headless EXE includes daemon/CLI only. Current Windows backend is NVIDIA/NVML focused."
+            --notes "Experimental Windows x86_64 build. Recommended download: LACT-Windows-GUI-Preview-Setup.exe. It installs the GTK/libadwaita GUI plus the local daemon/CLI runtime. The portable GUI ZIP contains LACT.exe (GUI) and lact.exe (daemon/CLI). Current Windows backend is NVIDIA/NVML focused."
