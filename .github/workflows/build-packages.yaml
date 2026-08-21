@@ -6,8 +6,13 @@ on:
     tags: '*'
   pull_request:
 
+concurrency:
+  group: build-packages-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-packages:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     strategy:
       matrix:
         target-os: [ debian-13, ubuntu-2404, ubuntu-2604, fedora-43, fedora-44, arch, opensuse-tumbleweed ]
@@ -97,6 +102,7 @@ jobs:
           path: release-artifacts/*
 
   build-flatpak:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: bilelmoussaoui/flatpak-github-actions:gnome-47
@@ -115,6 +121,7 @@ jobs:
         path: io.github.ilya_zlobintsev.LACT.flatpak
         
   build-docker:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - name: Log into GHCR
