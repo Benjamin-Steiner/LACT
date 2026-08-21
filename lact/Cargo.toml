@@ -20,6 +20,11 @@ divan = { workspace = true }
 lact-daemon = { path = "../lact-daemon", features = ["bench"] }
 lact-gui = { path = "../lact-gui", features = ["bench"] }
 
+[[bin]]
+name = "lact-gui-windows"
+path = "src/bin/lact-gui-windows.rs"
+required-features = ["lact-gui"]
+
 [[bench]]
 name = "bench"
 harness = false
