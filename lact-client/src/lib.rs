@@ -10,7 +10,12 @@ use lact_schema::{
 
 use amdgpu_sysfs::gpu_handle::power_profile_mode::PowerProfileModesTable;
 use anyhow::Context;
-use connection::{DaemonConnection, tcp::TcpConnection, unix::UnixConnection};
+use connection::{DaemonConnection, tcp::TcpConnection};
+#[cfg(unix)]
+use connection::unix::UnixConnection;
+#[cfg(windows)]
+use connection::windows::{DEFAULT_PIPE_NAME, NamedPipeConnection};
+#[cfg(unix)]
 use nix::unistd::getuid;
 use schema::{
     ClocksInfo, DeviceInfo, DeviceListEntry, DeviceStats, PowerStates, ProfilesInfo, Request,
@@ -18,10 +23,9 @@ use schema::{
     request::{ConfirmCommand, ProfileBase, SetClocksCommand},
 };
 use serde::de::DeserializeOwned;
-use std::{
-    fmt, future::Future, io, os::unix::net::UnixStream, path::PathBuf, pin::Pin, rc::Rc,
-    time::Duration,
-};
+use std::{fmt, future::Future, io, pin::Pin, rc::Rc, time::Duration};
+#[cfg(unix)]
+use std::{os::unix::net::UnixStream, path::PathBuf};
 use tokio::{
     net::ToSocketAddrs,
     sync::{Mutex, broadcast},
@@ -45,9 +49,19 @@ impl DaemonClient {
     }
 
     pub async fn connect_with_reconnect(reconnect: bool) -> anyhow::Result<Self> {
-        let path = get_socket_path()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "socket file not found"))?;
-        let stream = UnixConnection::connect(&path).await?;
+        #[cfg(unix)]
+        let stream: Box<dyn DaemonConnection> = {
+            let path = get_socket_path()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "socket file not found"))?;
+            UnixConnection::connect(&path).await?
+        };
+
+        #[cfg(windows)]
+        let stream: Box<dyn DaemonConnection> = {
+            let pipe_name = std::env::var("LACT_DAEMON_PIPE")
+                .unwrap_or_else(|_| DEFAULT_PIPE_NAME.to_owned());
+            NamedPipeConnection::connect(pipe_name).await?
+        };
 
         Ok(Self {
             stream: Rc::new(Mutex::new(stream)),
@@ -68,6 +82,7 @@ impl DaemonClient {
         })
     }
 
+    #[cfg(unix)]
     pub fn from_stream(stream: UnixStream, embedded: bool) -> anyhow::Result<Self> {
         let connection = UnixConnection::try_from(stream)?;
         Ok(Self {
@@ -109,12 +124,12 @@ impl DaemonClient {
                         return Err(err);
                     }
 
-                    error!("Could not make request: {err}, reconnecting to socket");
+                    error!("Could not make request: {err}, reconnecting to service");
 
                     loop {
                         match stream.new_connection().await {
                             Ok(new_connection) => {
-                                info!("Established new socket connection");
+                                info!("Established new daemon connection");
                                 *stream = new_connection;
                                 drop(stream);
 
@@ -192,8 +207,7 @@ impl DaemonClient {
     }
 
     pub async fn create_profile(&self, name: String, base: ProfileBase) -> anyhow::Result<()> {
-        self.make_request(Request::CreateProfile { name, base })
-            .await
+        self.make_request(Request::CreateProfile { name, base }).await
     }
 
     pub async fn delete_profile(&self, name: String) -> anyhow::Result<()> {
@@ -263,6 +277,7 @@ impl fmt::Debug for DaemonClient {
     }
 }
 
+#[cfg(unix)]
 fn get_socket_path() -> Option<PathBuf> {
     let root_path = PathBuf::from("/run/lactd.sock");
 
