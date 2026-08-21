@@ -1,4 +1,4 @@
-name: Windows preview release
+name: Windows NVIDIA tuning preview
 
 on:
   workflow_dispatch:
@@ -7,68 +7,16 @@ on:
       - windows/platform-foundation-20260821
     paths:
       - '.github/workflows/windows-release.yml'
-      - 'lact/**'
-      - 'lact-cli/**'
-      - 'lact-client/**'
-      - 'lact-daemon/**'
-      - 'lact-gui/**'
-      - 'lact-schema/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-  pull_request:
-    paths:
-      - '.github/workflows/windows-release.yml'
-      - 'lact/**'
-      - 'lact-cli/**'
-      - 'lact-client/**'
-      - 'lact-daemon/**'
-      - 'lact-gui/**'
-      - 'lact-schema/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
 
 permissions:
   contents: write
 
 concurrency:
-  group: windows-preview-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: windows-nvidia-preview
   cancel-in-progress: true
 
 jobs:
-  build-headless-release:
-    runs-on: windows-latest
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: windows/platform-foundation-20260821
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.97.0'
-
-      - name: Build headless release executable
-        run: cargo build --release -p lact --no-default-features --bin lact
-
-      - name: Prepare headless release files
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item .\target\release\lact.exe .\dist\lact-windows-headless-x86_64.exe
-          $hash = (Get-FileHash .\dist\lact-windows-headless-x86_64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  lact-windows-headless-x86_64.exe" | Set-Content -Encoding ascii .\dist\lact-windows-headless-x86_64.exe.sha256.txt
-
-      - name: Upload headless artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lact-windows-headless-x86_64
-          path: |
-            dist/lact-windows-headless-x86_64.exe
-            dist/lact-windows-headless-x86_64.exe.sha256.txt
-          if-no-files-found: error
-
-  build-gui-release:
+  build-release:
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -99,35 +47,34 @@ jobs:
           toolchain: '1.97.0'
           targets: x86_64-pc-windows-gnu
 
-      - name: Verify GNU target and GTK toolchain
-        shell: pwsh
-        env:
-          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
-        run: |
-          rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
-          rustup target list --installed --toolchain 1.97.0
-          $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
-          $pkgconf = Join-Path $mingw 'bin\pkgconf.exe'
-          if (-not (Test-Path $pkgconf)) { throw "MSYS2 pkgconf.exe not found at $pkgconf" }
-          & $pkgconf --version
-          & $pkgconf --modversion glib-2.0
-          & $pkgconf --modversion libadwaita-1
-
-      - name: Build GUI and daemon executables
+      - name: Build windowed GUI and backend
         shell: pwsh
         env:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
           PKG_CONFIG_ALLOW_CROSS: '1'
         run: |
+          $ErrorActionPreference = 'Stop'
+          rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
+
           $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
           $mingwBin = Join-Path $mingw 'bin'
           $env:PATH = "$env:USERPROFILE\.cargo\bin;$mingwBin;$env:PATH"
           $env:PKG_CONFIG = Join-Path $mingwBin 'pkgconf.exe'
           $env:PKG_CONFIG_PATH = "$(Join-Path $mingw 'lib\pkgconfig');$(Join-Path $mingw 'share\pkgconfig')"
           $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = Join-Path $mingwBin 'gcc.exe'
-          cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia --bin lact --bin lact-gui-windows
 
-      - name: Assemble portable GUI runtime
+          & $env:PKG_CONFIG --modversion glib-2.0
+          & $env:PKG_CONFIG --modversion libadwaita-1
+
+          # Build the dedicated Windows-subsystem GUI binary first.
+          cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia --bin lact-gui-windows
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\lact-gui-windows.exe .\target\x86_64-pc-windows-gnu\release\LACT-GUI.exe -Force
+
+          # Build the daemon/CLI separately without the GUI feature. The GUI
+          # expects a sibling named lact.exe and starts it with the daemon command.
+          cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features nvidia --bin lact
+
+      - name: Assemble portable runtime
         shell: pwsh
         env:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
@@ -135,15 +82,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
           $mingwBin = Join-Path $mingw 'bin'
-          $dist = 'dist\lact-windows-gui-x86_64'
+          $dist = 'dist\LACT-Windows-NVIDIA-Tuning'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
-          # LACT.exe is the windowed launcher. lact.exe is the daemon/CLI process
-          # that the GUI starts automatically through the local named pipe.
-          Copy-Item .\target\x86_64-pc-windows-gnu\release\lact-gui-windows.exe "$dist\LACT.exe"
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\LACT-GUI.exe "$dist\LACT-GUI.exe"
           Copy-Item .\target\x86_64-pc-windows-gnu\release\lact.exe "$dist\lact.exe"
 
-          # Runtime data used by GTK/libadwaita on a machine without MSYS2.
+          # Sanity check: these MUST remain two separate files on Windows.
+          if (-not (Test-Path "$dist\LACT-GUI.exe")) { throw 'LACT-GUI.exe missing' }
+          if (-not (Test-Path "$dist\lact.exe")) { throw 'lact.exe backend missing' }
+          $guiHash = (Get-FileHash "$dist\LACT-GUI.exe" -Algorithm SHA256).Hash
+          $backendHash = (Get-FileHash "$dist\lact.exe" -Algorithm SHA256).Hash
+          if ($guiHash -eq $backendHash) { throw 'GUI and backend unexpectedly contain identical binaries' }
+
           $copyTrees = @(
             @{ Source = "$mingw\share\glib-2.0\schemas"; Destination = "$dist\share\glib-2.0\schemas" },
             @{ Source = "$mingw\share\icons\Adwaita"; Destination = "$dist\share\icons\Adwaita" },
@@ -167,13 +118,12 @@ jobs:
             Copy-Item $queryLoaders "$dist\gdk-pixbuf-query-loaders.exe"
           }
 
-          # Recursively copy only MinGW DLL dependencies required by the two
-          # executables, GTK modules and pixbuf loaders. Windows system DLLs are
-          # ignored because they do not exist in the MinGW bin directory.
+          # Copy the transitive MinGW DLL dependencies required by the GUI,
+          # backend and GTK runtime modules. Windows system DLLs are ignored.
           $objdump = Join-Path $mingwBin 'objdump.exe'
           $queue = [System.Collections.Generic.Queue[string]]::new()
           $seen = @{}
-          $queue.Enqueue((Resolve-Path "$dist\LACT.exe").Path)
+          $queue.Enqueue((Resolve-Path "$dist\LACT-GUI.exe").Path)
           $queue.Enqueue((Resolve-Path "$dist\lact.exe").Path)
           if (Test-Path "$dist\gdk-pixbuf-query-loaders.exe") {
             $queue.Enqueue((Resolve-Path "$dist\gdk-pixbuf-query-loaders.exe").Path)
@@ -192,10 +142,8 @@ jobs:
               $key = $dep.ToLowerInvariant()
               if ($seen.ContainsKey($key)) { continue }
               $seen[$key] = $true
-
               $src = Join-Path $mingwBin $dep
               if (-not (Test-Path $src)) { continue }
-
               $dst = Join-Path $dist $dep
               Copy-Item $src $dst -Force
               $queue.Enqueue((Resolve-Path $dst).Path)
@@ -206,49 +154,46 @@ jobs:
           LACT Windows NVIDIA Tuning Preview
           ==================================
 
-          Start LACT.exe. Do not start lact.exe directly unless you want the CLI.
+          Start LACT-GUI.exe.
 
-          LACT.exe opens the Windows GUI and automatically starts lact.exe as the
-          local background daemon when needed. For NVIDIA settings that the driver
-          only permits with elevation, right-click LACT.exe and choose
-          "Run as administrator".
+          lact.exe is the local backend/CLI and is started automatically by the
+          GUI. Do not use lact.exe as the desktop application.
 
-          Current Windows v1 functionality:
-          - NVIDIA GPU detection and live telemetry through NVML
-          - core clock offset across editable NVAPI V/F points, with NVML P-state fallback
-          - memory clock offset across every writable NVIDIA memory P-state
-          - minimum/maximum GPU locked clocks
-          - minimum/maximum memory locked clocks
+          Windows v1 controls:
+          - live NVIDIA telemetry through NVML
+          - core clock offset through native NVIDIA NVAPI V/F points, with NVML fallback
+          - memory clock offset across writable memory P-states
+          - GPU minimum/maximum locked clocks
+          - memory minimum/maximum locked clocks
           - NVAPI voltage boost when exposed by the driver
-          - NVIDIA power-limit control
-          - Reset All for clock offsets, V/F curve, clock locks and voltage boost
+          - NVIDIA power limit
+          - reset of clock offsets, V/F curve, locks and voltage boost
 
-          Direct V/F point voltage editing is intentionally disabled because the
-          NVIDIA driver exposes those point voltages as immutable on this path.
-
-          This is an experimental unsigned preview, so Windows SmartScreen may
-          display an Unknown Publisher warning.
+          If a driver write requires elevation, close LACT and run LACT-GUI.exe
+          as Administrator.
           '@ | Set-Content -Encoding utf8 "$dist\README-WINDOWS.txt"
 
-      - name: Build portable ZIP and installer
+      - name: Build installer and portable ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = 'dist\lact-windows-gui-x86_64'
+          $dist = 'dist\LACT-Windows-NVIDIA-Tuning'
+          $zip = '.\dist\LACT-Windows-NVIDIA-Tuning-Portable.zip'
+          $setup = '.\dist\LACT-Windows-NVIDIA-Tuning-Setup.exe'
 
-          Compress-Archive -Path "$dist\*" -DestinationPath .\dist\lact-windows-gui-x86_64.zip -CompressionLevel Optimal -Force
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip -CompressionLevel Optimal -Force
 
           $iss = @'
           [Setup]
-          AppId=LACT-Windows-Preview
-          AppName=LACT Windows Preview
+          AppId=LACT-Windows-NVIDIA-Tuning-Preview
+          AppName=LACT Windows NVIDIA Tuning Preview
           AppVersion=0.10.1-preview
           AppPublisher=LACT Windows Port
-          DefaultDirName={localappdata}\Programs\LACT Windows Preview
-          DefaultGroupName=LACT Windows Preview
-          UninstallDisplayIcon={app}\LACT.exe
+          DefaultDirName={localappdata}\Programs\LACT Windows NVIDIA Tuning Preview
+          DefaultGroupName=LACT Windows NVIDIA Tuning Preview
+          UninstallDisplayIcon={app}\LACT-GUI.exe
           OutputDir=dist
-          OutputBaseFilename=LACT-Windows-GUI-Preview-Setup
+          OutputBaseFilename=LACT-Windows-NVIDIA-Tuning-Setup
           Compression=lzma2
           SolidCompression=yes
           WizardStyle=modern
@@ -260,14 +205,14 @@ jobs:
           Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
           [Files]
-          Source: "dist\lact-windows-gui-x86_64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+          Source: "dist\LACT-Windows-NVIDIA-Tuning\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
-          Name: "{group}\LACT Windows Preview"; Filename: "{app}\LACT.exe"
-          Name: "{autodesktop}\LACT Windows Preview"; Filename: "{app}\LACT.exe"; Tasks: desktopicon
+          Name: "{group}\LACT Windows NVIDIA Tuning"; Filename: "{app}\LACT-GUI.exe"
+          Name: "{autodesktop}\LACT Windows NVIDIA Tuning"; Filename: "{app}\LACT-GUI.exe"; Tasks: desktopicon
 
           [Run]
-          Filename: "{app}\LACT.exe"; Description: "Launch LACT Windows Preview"; Flags: nowait postinstall skipifsilent
+          Filename: "{app}\LACT-GUI.exe"; Description: "Launch LACT Windows NVIDIA Tuning"; Flags: nowait postinstall skipifsilent
           '@
           $iss | Set-Content -Encoding ascii .\windows-gui-preview.iss
 
@@ -284,57 +229,37 @@ jobs:
           & $iscc .\windows-gui-preview.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
 
-          $files = @(
-            '.\dist\lact-windows-gui-x86_64.zip',
-            '.\dist\LACT-Windows-GUI-Preview-Setup.exe'
-          )
-          foreach ($file in $files) {
-            if (-not (Test-Path $file)) { throw "Expected release file missing: $file" }
-          }
+          if (-not (Test-Path $setup)) { throw 'Installer was not produced' }
+          if (-not (Test-Path $zip)) { throw 'Portable ZIP was not produced' }
 
-          $checksumLines = foreach ($file in $files) {
+          $checksumLines = foreach ($file in @($setup, $zip)) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $([IO.Path]::GetFileName($file))"
           }
-          $checksumLines | Set-Content -Encoding ascii .\dist\lact-windows-gui-x86_64.sha256.txt
+          $checksumLines | Set-Content -Encoding ascii .\dist\LACT-Windows-NVIDIA-Tuning.sha256.txt
 
-      - name: Upload GUI artifact
+      - name: Upload GUI package
         uses: actions/upload-artifact@v4
         with:
-          name: lact-windows-gui-x86_64
+          name: LACT-Windows-NVIDIA-Tuning
           path: |
-            dist/LACT-Windows-GUI-Preview-Setup.exe
-            dist/lact-windows-gui-x86_64.zip
-            dist/lact-windows-gui-x86_64.sha256.txt
+            dist/LACT-Windows-NVIDIA-Tuning-Setup.exe
+            dist/LACT-Windows-NVIDIA-Tuning-Portable.zip
+            dist/LACT-Windows-NVIDIA-Tuning.sha256.txt
           if-no-files-found: error
 
-  publish-prerelease:
-    needs: [build-headless-release, build-gui-release]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
       - name: Create GitHub prerelease
-        shell: bash
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="windows-preview-${{ github.run_number }}"
-          gh release create "$tag" \
-            dist/LACT-Windows-GUI-Preview-Setup.exe \
-            dist/lact-windows-gui-x86_64.zip \
-            dist/lact-windows-gui-x86_64.sha256.txt \
-            dist/lact-windows-headless-x86_64.exe \
-            dist/lact-windows-headless-x86_64.exe.sha256.txt \
-            --repo "${{ github.repository }}" \
-            --target "windows/platform-foundation-20260821" \
-            --title "LACT Windows NVIDIA Tuning Preview ${{ github.run_number }}" \
-            --prerelease \
-            --notes "Recommended download: LACT-Windows-GUI-Preview-Setup.exe. Windows v1 includes the GUI, live NVIDIA telemetry, core offset through native NVAPI V/F points with NVML P-state fallback, memory offsets across writable P-states, GPU/memory min-max clock locks, NVAPI voltage boost, power limit, and reset-all. Direct V/F voltage editing remains read-only."
+          $tag = "windows-gui-preview-${{ github.run_number }}"
+          gh release create $tag `
+            .\dist\LACT-Windows-NVIDIA-Tuning-Setup.exe `
+            .\dist\LACT-Windows-NVIDIA-Tuning-Portable.zip `
+            .\dist\LACT-Windows-NVIDIA-Tuning.sha256.txt `
+            --repo "${{ github.repository }}" `
+            --target "windows/platform-foundation-20260821" `
+            --title "LACT Windows NVIDIA Tuning Preview ${{ github.run_number }}" `
+            --prerelease `
+            --notes "Download LACT-Windows-NVIDIA-Tuning-Setup.exe. This build contains a dedicated windowed LACT-GUI.exe plus a separate lact.exe backend, fixing the previous Windows filename collision. v1 exposes NVIDIA telemetry, NVAPI core V/F clock offset, memory offset, GPU/memory clock locks, voltage boost, power limit and reset controls from the GUI."

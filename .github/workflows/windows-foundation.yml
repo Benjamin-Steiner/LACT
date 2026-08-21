@@ -1,55 +1,35 @@
-name: Windows foundation
+name: Windows foundation checks
 
 on:
-  push:
-    branches:
-      - windows/platform-foundation-20260821
-  pull_request:
-    paths:
-      - 'lact/**'
-      - 'lact-cli/**'
-      - 'lact-client/**'
-      - 'lact-schema/**'
-      - 'lact-daemon/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/windows-foundation.yml'
+  workflow_dispatch:
 
 concurrency:
-  group: windows-foundation-${{ github.ref }}
+  group: windows-foundation-manual
   cancel-in-progress: true
 
 jobs:
-  client-check:
+  windows-checks:
     runs-on: windows-2025
+    timeout-minutes: 30
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: windows/platform-foundation-20260821
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.97'
+          toolchain: '1.97.0'
+
       - name: Check schema and client
         run: cargo check -p lact-schema -p lact-client
 
-  daemon-check:
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.97'
       - name: Check Windows daemon
-        run: cargo check -p lact-daemon --no-default-features
+        run: cargo check -p lact-daemon --no-default-features --features nvidia
 
-  executable-smoke-test:
-    runs-on: windows-2025
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.97'
-      - name: Build Windows executable
-        run: cargo build -p lact --no-default-features
+      - name: Build daemon/CLI smoke binary
+        run: cargo build -p lact --no-default-features --features nvidia --bin lact
+
       - name: Start daemon and query it with the CLI
         shell: pwsh
         run: |
@@ -64,8 +44,3 @@ jobs:
           finally {
             Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
           }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: lact-windows-foundation-debug
-          path: target/debug/lact.exe
-          if-no-files-found: error
