@@ -11,16 +11,11 @@ display-info = ["dep:libdisplay-info"]
 
 [dependencies]
 lact-schema = { path = "../lact-schema" }
-
-amdgpu-sysfs = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
-serde_with = { workspace = true }
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
-nix = { workspace = true, features = ["user", "fs", "ioctl", "socket"] }
-jiff = { workspace = true }
 tokio = { workspace = true, features = [
     "rt",
     "macros",
@@ -28,12 +23,18 @@ tokio = { workspace = true, features = [
     "time",
     "signal",
     "sync",
+    "io-util",
 ] }
+divan = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+amdgpu-sysfs = { workspace = true }
+serde_with = { workspace = true }
+nix = { workspace = true, features = ["user", "fs", "ioctl", "socket"] }
+jiff = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
-divan = { workspace = true, optional = true }
 serde_norway = { workspace = true }
-
 nvml-wrapper = { workspace = true }
 bitflags = "2.13.0"
 pciid-parser = { version = "0.8", features = ["serde"] }
@@ -48,7 +49,6 @@ os-release = "0.1.0"
 notify = { version = "8.2.0", default-features = false }
 libcopes = "1.0.0"
 libloading = "0.8.9" # Can be updated when https://github.com/rust-lang/rust-bindgen/issues/3332 is released
-
 ureq = { version = "3.3.0", features = ["json", "rustls"] }
 libdisplay-info = { version= "0.3.0", optional = true }
 
