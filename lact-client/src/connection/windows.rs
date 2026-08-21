@@ -8,6 +8,10 @@ use tracing::debug;
 
 pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\lactd";
 
+const ERROR_FILE_NOT_FOUND: i32 = 2;
+const ERROR_PIPE_BUSY: i32 = 231;
+const CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub struct NamedPipeConnection {
     pipe_name: String,
     inner: BufReader<NamedPipeClient>,
@@ -26,8 +30,16 @@ impl NamedPipeConnection {
                         inner: BufReader::new(inner),
                     }));
                 }
-                Err(err) if err.raw_os_error() == Some(231) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                // The service may be starting and not have created the first pipe instance yet,
+                // or all current pipe instances may be busy. Treat both as transient so client
+                // startup and daemon/service startup do not race each other.
+                Err(err)
+                    if matches!(
+                        err.raw_os_error(),
+                        Some(ERROR_FILE_NOT_FOUND | ERROR_PIPE_BUSY)
+                    ) =>
+                {
+                    tokio::time::sleep(CONNECT_RETRY_DELAY).await;
                 }
                 Err(err) => return Err(err.into()),
             }
