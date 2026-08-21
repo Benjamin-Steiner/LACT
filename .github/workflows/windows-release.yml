@@ -1,0 +1,57 @@
+name: Windows preview release
+
+on:
+  push:
+    branches:
+      - windows/platform-foundation-20260821
+    paths:
+      - '.github/workflows/windows-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-2025
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97'
+
+      - name: Build release executable
+        run: cargo build --release -p lact --no-default-features
+
+      - name: Prepare release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item .\target\release\lact.exe .\dist\lact-windows-x86_64.exe
+          $hash = (Get-FileHash .\dist\lact-windows-x86_64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  lact-windows-x86_64.exe" | Set-Content -Encoding ascii .\dist\lact-windows-x86_64.exe.sha256.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lact-windows-x86_64
+          path: |
+            dist/lact-windows-x86_64.exe
+            dist/lact-windows-x86_64.exe.sha256.txt
+          if-no-files-found: error
+
+      - name: Create GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-preview-${{ github.run_number }}"
+          gh release create $tag `
+            .\dist\lact-windows-x86_64.exe `
+            .\dist\lact-windows-x86_64.exe.sha256.txt `
+            --target "${{ github.sha }}" `
+            --title "LACT Windows Preview ${{ github.run_number }}" `
+            --prerelease `
+            --notes "Experimental Windows x86_64 build from branch windows/platform-foundation-20260821. Current Windows backend is NVIDIA/NVML focused and does not include the GTK GUI yet. Run the daemon elevated, then use the CLI from the same executable."
