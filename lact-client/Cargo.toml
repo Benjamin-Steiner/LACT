@@ -13,4 +13,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["net", "sync", "time", "io-util"] }
 futures = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["user"] }
