@@ -7,10 +7,13 @@ use std::{
 fn main() {
     println!("cargo::rerun-if-changed=include/");
 
-    gen_intel_bindings();
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "windows" {
+        gen_intel_bindings();
 
-    #[cfg(feature = "nvidia")]
-    gen_nvidia_bindings();
+        #[cfg(feature = "nvidia")]
+        gen_nvidia_bindings();
+    }
 
     gen_vulkan_constants();
 }
