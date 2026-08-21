@@ -17,6 +17,8 @@ mod system;
 mod tests;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_nvapi;
 
 #[cfg(unix)]
 use anyhow::Context;
