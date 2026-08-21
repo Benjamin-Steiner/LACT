@@ -1,33 +1,52 @@
+#[cfg(unix)]
 mod app;
+#[cfg(unix)]
 mod config;
 #[cfg(unix)]
 mod service_setup;
+#[cfg(windows)]
+mod windows_app;
 
+use anyhow::Context;
+use lact_schema::args::GuiArgs;
+use relm4::RelmApp;
+use tracing::metadata::LevelFilter;
+use tracing_subscriber::EnvFilter;
+
+#[cfg(unix)]
 use std::{
     panic,
     sync::{LazyLock, atomic::AtomicBool, atomic::Ordering},
 };
 
-use anyhow::Context;
+#[cfg(unix)]
 use app::{APP_BROKER, AppModel, msg::AppMsg};
+#[cfg(unix)]
 use config::UiConfig;
+#[cfg(unix)]
 use i18n_embed::fluent::{FluentLanguageLoader, fluent_language_loader};
-use lact_schema::{args::GuiArgs, i18n};
+#[cfg(unix)]
+use lact_schema::i18n;
+#[cfg(unix)]
 use relm4::{
-    RelmApp, SharedState,
+    SharedState,
     gtk::{glib, glib::MainContext},
 };
+#[cfg(unix)]
 use rust_embed::RustEmbed;
-use tracing::metadata::LevelFilter;
-use tracing_subscriber::EnvFilter;
 
+#[cfg(unix)]
 static CONFIG: SharedState<UiConfig> = SharedState::new();
+#[cfg(unix)]
 static PANICKED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 const GUI_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const APP_ID: &str = "io.github.ilya_zlobintsev.LACT";
+#[cfg(unix)]
 pub const REPO_URL: &str = "https://github.com/ilya-zlobintsev/LACT";
 
+#[cfg(unix)]
 pub(crate) static I18N: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
     i18n::loader(
         fluent_language_loader!(),
@@ -36,18 +55,24 @@ pub(crate) static I18N: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
     )
 });
 
+#[cfg(unix)]
 #[derive(RustEmbed)]
 #[folder = "i18n"]
 pub struct Localizations;
 
-pub fn run(args: GuiArgs) -> anyhow::Result<()> {
+fn init_logging(args: &GuiArgs) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .parse(args.log_level.as_deref().unwrap_or_default())
         .context("Invalid log level")?;
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    Ok(())
+}
 
-    // handle panic
+#[cfg(unix)]
+pub fn run(args: GuiArgs) -> anyhow::Result<()> {
+    init_logging(&args)?;
+
     let old_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         old_hook(info);
@@ -74,9 +99,6 @@ pub fn run(args: GuiArgs) -> anyhow::Result<()> {
         let main_context = MainContext::default();
         if main_context.is_owner() {
             APP_BROKER.send(AppMsg::Crash(full_msg));
-            // when panic happens in the main thread, it buble up and kills the mainLoop
-            // which results in the application being unresponsive.
-            // this hack "revives" it
             let loop_ = glib::MainLoop::new(Some(&main_context), false);
             glib::idle_add_local_once(move || {
                 loop_.run();
@@ -88,7 +110,6 @@ pub fn run(args: GuiArgs) -> anyhow::Result<()> {
         }
     }));
 
-    // Pre-init localization
     LazyLock::force(&I18N);
     LazyLock::force(&lact_schema::i18n::LANGUAGE_LOADER);
 
@@ -100,5 +121,14 @@ pub fn run(args: GuiArgs) -> anyhow::Result<()> {
         .with_broker(&APP_BROKER)
         .with_args(vec![])
         .run_async::<AppModel>(args);
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn run(args: GuiArgs) -> anyhow::Result<()> {
+    init_logging(&args)?;
+    RelmApp::new(APP_ID)
+        .with_args(vec![])
+        .run_async::<windows_app::WindowsApp>(args);
     Ok(())
 }
