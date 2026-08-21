@@ -16,7 +16,7 @@ use tokio::{
     net::windows::named_pipe::ServerOptions,
     runtime,
 };
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\lactd";
 const NVIDIA_ID_PREFIX: &str = "nvidia:";
@@ -96,7 +96,13 @@ fn init_nvml() -> anyhow::Result<Nvml> {
 }
 
 fn list_devices() -> anyhow::Result<Vec<DeviceListEntry>> {
-    let nvml = init_nvml()?;
+    let nvml = match init_nvml() {
+        Ok(nvml) => nvml,
+        Err(err) => {
+            warn!("NVIDIA NVML is unavailable; no NVIDIA GPUs will be listed: {err:#}");
+            return Ok(vec![]);
+        }
+    };
     let count = nvml.device_count().context("Could not query NVIDIA GPU count")?;
     let mut devices = Vec::with_capacity(count as usize);
 
