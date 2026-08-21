@@ -98,15 +98,20 @@ jobs:
           toolchain: '1.97.0'
           targets: x86_64-pc-windows-gnu
 
-      - name: Verify GNU target
+      - name: Verify GNU target and GTK toolchain
         shell: pwsh
         run: |
           rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
           rustup target list --installed --toolchain 1.97.0
+          if (-not (Test-Path 'C:\msys64\mingw64\bin\pkgconf.exe')) { throw 'MSYS2 pkgconf.exe not found' }
+          & 'C:\msys64\mingw64\bin\pkgconf.exe' --version
+          & 'C:\msys64\mingw64\bin\pkgconf.exe' --modversion glib-2.0
+          & 'C:\msys64\mingw64\bin\pkgconf.exe' --modversion libadwaita-1
 
       - name: Build GUI and daemon executables
         shell: pwsh
         env:
+          PKG_CONFIG: C:\msys64\mingw64\bin\pkgconf.exe
           PKG_CONFIG_PATH: C:\msys64\mingw64\lib\pkgconfig;C:\msys64\mingw64\share\pkgconfig
           PKG_CONFIG_ALLOW_CROSS: '1'
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: C:\msys64\mingw64\bin\gcc.exe
