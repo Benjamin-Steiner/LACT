@@ -8,6 +8,7 @@ on:
     paths:
       - 'lact-client/**'
       - 'lact-schema/**'
+      - 'lact-daemon/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/windows-foundation.yml'
@@ -22,3 +23,14 @@ jobs:
           toolchain: '1.97'
       - name: Check schema and client
         run: cargo check -p lact-schema -p lact-client
+
+  daemon-probe:
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97'
+      - name: Probe daemon compilation
+        run: cargo check -p lact-daemon --no-default-features
