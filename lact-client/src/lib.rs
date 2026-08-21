@@ -33,10 +33,15 @@ use tokio::{
     net::ToSocketAddrs,
     sync::{Mutex, broadcast},
 };
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 const STATUS_MSG_CHANNEL_SIZE: usize = 16;
 const RECONNECT_INTERVAL_MS: u64 = 500;
+
+#[cfg(windows)]
+const WINDOWS_GPU_WRITE_UNLOCK_ENV: &str = "LACT_WINDOWS_ENABLE_GPU_WRITES";
+#[cfg(windows)]
+const WINDOWS_GPU_WRITE_UNLOCK_VALUE: &str = "I_UNDERSTAND_THIS_IS_EXPERIMENTAL";
 
 #[derive(Clone)]
 pub struct DaemonClient {
@@ -105,6 +110,17 @@ impl DaemonClient {
         request: Request<'a>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<T>> + 'a>> {
         Box::pin(async {
+            #[cfg(windows)]
+            if is_windows_gpu_write_request(&request) && !windows_gpu_writes_enabled() {
+                warn!(
+                    request = ?request,
+                    "Blocked Windows GPU-changing request in Safe Read-Only Mode"
+                );
+                return Err(anyhow::anyhow!(
+                    "Windows Safe Read-Only Mode is active. This preview blocks GPU-changing requests in the LACT client."
+                ));
+            }
+
             let mut stream = self.stream.lock().await;
 
             let request_payload = serde_json::to_string(&request)?;
@@ -281,6 +297,41 @@ impl DaemonClient {
     pub async fn confirm_pending_config(&self, command: ConfirmCommand) -> anyhow::Result<()> {
         self.make_request(Request::ConfirmPendingConfig(command)).await
     }
+}
+
+#[cfg(windows)]
+fn windows_gpu_writes_enabled() -> bool {
+    std::env::var(WINDOWS_GPU_WRITE_UNLOCK_ENV)
+        .is_ok_and(|value| value == WINDOWS_GPU_WRITE_UNLOCK_VALUE)
+}
+
+#[cfg(windows)]
+fn is_windows_gpu_write_request(request: &Request<'_>) -> bool {
+    matches!(
+        request,
+        Request::SetFanControl(_)
+            | Request::ResetPmfw { .. }
+            | Request::SetPowerCap { .. }
+            | Request::SetPerformanceLevel { .. }
+            | Request::SetClocksValue { .. }
+            | Request::BatchSetClocksValue { .. }
+            | Request::SetPowerProfileMode { .. }
+            | Request::SetEnabledPowerStates { .. }
+            | Request::SetProfile { .. }
+            | Request::CreateProfile { .. }
+            | Request::DeleteProfile { .. }
+            | Request::MoveProfile { .. }
+            | Request::HoldProfile { .. }
+            | Request::ReleaseProfile { .. }
+            | Request::SetProfileRule { .. }
+            | Request::SetGpuConfig { .. }
+            | Request::DetachGpu { .. }
+            | Request::ReattachGpu { .. }
+            | Request::EnableOverdrive
+            | Request::DisableOverdrive
+            | Request::ConfirmPendingConfig(_)
+            | Request::RestConfig
+    )
 }
 
 impl fmt::Debug for DaemonClient {
