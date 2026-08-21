@@ -5,7 +5,7 @@ mod config;
 #[cfg(unix)]
 mod service_setup;
 #[cfg(windows)]
-mod windows_app;
+mod windows_app_safe;
 
 use anyhow::Context;
 use lact_schema::args::GuiArgs;
@@ -166,6 +166,6 @@ pub fn run(args: GuiArgs) -> anyhow::Result<()> {
     init_logging(&args)?;
     RelmApp::new(APP_ID)
         .with_args(vec![])
-        .run_async::<windows_app::WindowsApp>(args);
+        .run_async::<windows_app_safe::WindowsApp>(args);
     Ok(())
 }
