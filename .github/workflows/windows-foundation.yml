@@ -13,6 +13,10 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/windows-foundation.yml'
 
+concurrency:
+  group: windows-foundation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   client-check:
     runs-on: windows-2025
