@@ -2,12 +2,25 @@ name: Windows preview release
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - windows/platform-foundation-20260821
+    paths:
+      - '.github/workflows/windows-release.yml'
+      - 'lact/**'
+      - 'lact-cli/**'
+      - 'lact-client/**'
+      - 'lact-daemon/**'
+      - 'lact-gui/**'
+      - 'lact-schema/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 
 permissions:
   contents: write
 
 jobs:
-  build-release:
+  build-headless-release:
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -20,22 +33,127 @@ jobs:
         with:
           toolchain: '1.97'
 
-      - name: Build release executable
+      - name: Build headless release executable
         run: cargo build --release -p lact --no-default-features
 
-      - name: Prepare release files
+      - name: Prepare headless release files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item .\target\release\lact.exe .\dist\lact-windows-x86_64.exe
-          $hash = (Get-FileHash .\dist\lact-windows-x86_64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  lact-windows-x86_64.exe" | Set-Content -Encoding ascii .\dist\lact-windows-x86_64.exe.sha256.txt
+          Copy-Item .\target\release\lact.exe .\dist\lact-windows-headless-x86_64.exe
+          $hash = (Get-FileHash .\dist\lact-windows-headless-x86_64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  lact-windows-headless-x86_64.exe" | Set-Content -Encoding ascii .\dist\lact-windows-headless-x86_64.exe.sha256.txt
 
-      - name: Upload workflow artifact
+      - name: Upload headless artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lact-windows-x86_64
+          name: lact-windows-headless-x86_64
           path: |
-            dist/lact-windows-x86_64.exe
-            dist/lact-windows-x86_64.exe.sha256.txt
+            dist/lact-windows-headless-x86_64.exe
+            dist/lact-windows-headless-x86_64.exe.sha256.txt
           if-no-files-found: error
+
+  build-gui-release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: windows/platform-foundation-20260821
+
+      - name: Set up MSYS2 GTK runtime
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gtk4
+            mingw-w64-x86_64-libadwaita
+            mingw-w64-x86_64-gsettings-desktop-schemas
+            mingw-w64-x86_64-hicolor-icon-theme
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97'
+          targets: x86_64-pc-windows-gnu
+
+      - name: Build GUI release executable
+        shell: pwsh
+        env:
+          PATH: C:\msys64\mingw64\bin;${{ env.PATH }}
+          PKG_CONFIG_PATH: C:\msys64\mingw64\lib\pkgconfig;C:\msys64\mingw64\share\pkgconfig
+          PKG_CONFIG_ALLOW_CROSS: '1'
+        run: cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia
+
+      - name: Bundle GUI executable and GTK runtime
+        shell: pwsh
+        run: |
+          $dist = "dist\lact-windows-gui-x86_64"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\lact.exe "$dist\lact.exe"
+
+          $dlls = @(
+            'libgtk-4-1.dll','libadwaita-1-0.dll','libglib-2.0-0.dll','libgio-2.0-0.dll','libgobject-2.0-0.dll',
+            'libgdk_pixbuf-2.0-0.dll','libpango-1.0-0.dll','libpangocairo-1.0-0.dll','libcairo-2.dll',
+            'libgraphene-1.0-0.dll','libharfbuzz-0.dll','libfribidi-0.dll','libfontconfig-1.dll','libfreetype-6.dll',
+            'libepoxy-0.dll','libintl-8.dll','libiconv-2.dll','zlib1.dll','libgcc_s_seh-1.dll','libstdc++-6.dll',
+            'libwinpthread-1.dll'
+          )
+          foreach ($dll in $dlls) {
+            $src = "C:\msys64\mingw64\bin\$dll"
+            if (Test-Path $src) { Copy-Item $src $dist }
+          }
+
+          if (Test-Path C:\msys64\mingw64\share\glib-2.0\schemas) {
+            New-Item -ItemType Directory -Force -Path "$dist\share\glib-2.0" | Out-Null
+            Copy-Item C:\msys64\mingw64\share\glib-2.0\schemas "$dist\share\glib-2.0\" -Recurse
+          }
+          if (Test-Path C:\msys64\mingw64\share\icons) {
+            New-Item -ItemType Directory -Force -Path "$dist\share" | Out-Null
+            Copy-Item C:\msys64\mingw64\share\icons "$dist\share\" -Recurse
+          }
+
+          Compress-Archive -Path "$dist\*" -DestinationPath .\dist\lact-windows-gui-x86_64.zip -Force
+          $hash = (Get-FileHash .\dist\lact-windows-gui-x86_64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  lact-windows-gui-x86_64.zip" | Set-Content -Encoding ascii .\dist\lact-windows-gui-x86_64.zip.sha256.txt
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lact-windows-gui-x86_64
+          path: |
+            dist/lact-windows-gui-x86_64.zip
+            dist/lact-windows-gui-x86_64.zip.sha256.txt
+          if-no-files-found: error
+
+  publish-prerelease:
+    needs: [build-headless-release, build-gui-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="windows-preview-${{ github.run_number }}"
+          gh release create "$tag" \
+            dist/lact-windows-headless-x86_64.exe \
+            dist/lact-windows-headless-x86_64.exe.sha256.txt \
+            dist/lact-windows-gui-x86_64.zip \
+            dist/lact-windows-gui-x86_64.zip.sha256.txt \
+            --repo "${{ github.repository }}" \
+            --target "windows/platform-foundation-20260821" \
+            --title "LACT Windows Preview ${{ github.run_number }}" \
+            --prerelease \
+            --notes "Experimental Windows x86_64 build from branch windows/platform-foundation-20260821. GUI ZIP includes the Windows GTK/libadwaita preview app. Headless EXE includes daemon/CLI only. Current Windows backend is NVIDIA/NVML focused."
