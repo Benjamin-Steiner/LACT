@@ -1,16 +1,17 @@
 use amdgpu_sysfs::hw_mon::Temperature;
 use anyhow::{Context, anyhow};
 use lact_schema::{
-    ClockspeedStats, DeviceInfo, DeviceListEntry, DeviceStats, DeviceType, DrmInfo, FanStats,
-    LinkInfo, Pong, PowerStats, Request, Response, SystemInfo, TemperatureEntry, VersionInfo,
-    VramStats,
+    ClocksInfo, ClocksTable, ClockspeedStats, DeviceInfo, DeviceListEntry, DeviceStats, DeviceType,
+    DrmInfo, FanStats, LinkInfo, NvidiaClockOffset, NvidiaClocksTable, Pong, PowerStats, Request,
+    Response, SystemInfo, TemperatureEntry, VersionInfo, VramStats,
+    request::{ClockspeedType, SetClocksCommand},
 };
 use nvml_wrapper::{
     Device, Nvml,
-    enum_wrappers::device::{Clock, TemperatureSensor, TemperatureThreshold},
+    enum_wrappers::device::{Clock, PerformanceState, TemperatureSensor, TemperatureThreshold},
 };
 use serde::Serialize;
-use std::{collections::HashMap, env, fmt::Debug};
+use std::{cmp, collections::HashMap, env, fmt::Debug};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::windows::named_pipe::ServerOptions,
@@ -73,7 +74,11 @@ where
             Ok(Request::ListDevices) => ok_response(list_devices()?)?,
             Ok(Request::DeviceInfo { id, .. }) => ok_response(device_info(id)?)?,
             Ok(Request::DeviceStats { id }) => ok_response(device_stats(id)?)?,
+            Ok(Request::DeviceClocksInfo { id }) => ok_response(device_clocks_info(id)?)?,
             Ok(Request::SetPowerCap { id, cap }) => ok_response(set_power_cap(id, cap)?)?,
+            Ok(Request::SetClocksValue { id, command }) => {
+                ok_response(set_clocks_value(id, &command)?)?
+            }
             Ok(_) => serde_json::to_vec(&Response::<()>::from(anyhow!(
                 "This request is not implemented by the Windows backend yet"
             )))?,
@@ -268,6 +273,107 @@ fn device_stats(id: &str) -> anyhow::Result<DeviceStats> {
     }
 
     Ok(stats)
+}
+
+fn device_clocks_info(id: &str) -> anyhow::Result<ClocksInfo> {
+    let nvml = init_nvml()?;
+    let device = device_from_id(&nvml, id)?;
+    let states = device
+        .supported_performance_states()
+        .context("Could not query NVIDIA performance states")?;
+
+    let mut gpu_offsets = indexmap::IndexMap::new();
+    let mut mem_offsets = indexmap::IndexMap::new();
+    let mut gpu_clock_range: Option<(u32, u32)> = None;
+    let mut vram_clock_range: Option<(u32, u32)> = None;
+
+    for state in states {
+        let state_id = state.as_c();
+        for (clock, offsets, range) in [
+            (Clock::Graphics, &mut gpu_offsets, &mut gpu_clock_range),
+            (Clock::Memory, &mut mem_offsets, &mut vram_clock_range),
+        ] {
+            if let Ok(offset) = device.clock_offset(clock, state) {
+                offsets.insert(
+                    state_id,
+                    NvidiaClockOffset {
+                        current: offset.clock_offset_mhz,
+                        min: offset.min_clock_offset_mhz,
+                        max: offset.max_clock_offset_mhz,
+                    },
+                );
+            }
+
+            if let Ok((state_min, state_max)) = device.min_max_clock_of_pstate(clock, state) {
+                *range = Some(match *range {
+                    Some((current_min, current_max)) => (
+                        cmp::min(current_min, state_min),
+                        cmp::max(current_max, state_max),
+                    ),
+                    None => (state_min, state_max),
+                });
+            }
+        }
+    }
+
+    Ok(ClocksInfo {
+        table: Some(ClocksTable::Nvidia(NvidiaClocksTable {
+            gpu_offsets,
+            mem_offsets,
+            gpu_locked_clocks: None,
+            vram_locked_clocks: None,
+            gpu_clock_range,
+            vram_clock_range,
+            gpu_vf_curve: vec![],
+            voltage_boost: None,
+        })),
+        ..Default::default()
+    })
+}
+
+fn set_clocks_value(id: &str, command: &SetClocksCommand) -> anyhow::Result<u64> {
+    let nvml = init_nvml()?;
+    let mut device = device_from_id(&nvml, id)?;
+
+    match command.r#type {
+        ClockspeedType::GpuClockOffset(state) | ClockspeedType::MemClockOffset(state) => {
+            let performance_state = PerformanceState::try_from(state)
+                .map_err(|_| anyhow!("Invalid NVIDIA performance state {state}"))?;
+            let clock = if matches!(command.r#type, ClockspeedType::GpuClockOffset(_)) {
+                Clock::Graphics
+            } else {
+                Clock::Memory
+            };
+            let offset = command.value.unwrap_or(0);
+            device
+                .set_clock_offset(clock, performance_state, offset)
+                .with_context(|| {
+                    format!(
+                        "Could not set NVIDIA {clock:?} offset {offset} MHz for P-state {state}"
+                    )
+                })?;
+        }
+        ClockspeedType::Reset => {
+            if let Ok(states) = device.supported_performance_states() {
+                for state in states {
+                    for clock in [Clock::Graphics, Clock::Memory] {
+                        if device.clock_offset(clock, state).is_ok() {
+                            let _ = device.set_clock_offset(clock, state, 0);
+                        }
+                    }
+                }
+            }
+            let _ = device.reset_gpu_locked_clocks();
+            let _ = device.reset_mem_locked_clocks();
+        }
+        _ => {
+            return Err(anyhow!(
+                "This NVIDIA clock control requires Windows configuration-state support that is not implemented yet"
+            ));
+        }
+    }
+
+    Ok(0)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
