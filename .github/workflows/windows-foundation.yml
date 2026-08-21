@@ -6,6 +6,8 @@ on:
       - windows/platform-foundation-20260821
   pull_request:
     paths:
+      - 'lact/**'
+      - 'lact-cli/**'
       - 'lact-client/**'
       - 'lact-schema/**'
       - 'lact-daemon/**'
@@ -38,3 +40,33 @@ jobs:
           toolchain: '1.97'
       - name: Probe daemon compilation
         run: cargo check -p lact-daemon --no-default-features
+
+  executable-smoke-test:
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97'
+      - name: Build Windows executable
+        run: cargo build -p lact --no-default-features
+      - name: Start daemon and query it with the CLI
+        shell: pwsh
+        run: |
+          $daemon = Start-Process -FilePath .\target\debug\lact.exe -ArgumentList 'daemon' -PassThru
+          try {
+            Start-Sleep -Seconds 2
+            & .\target\debug\lact.exe cli list-gpus
+            if ($LASTEXITCODE -ne 0) {
+              throw "LACT CLI smoke test failed with exit code $LASTEXITCODE"
+            }
+          }
+          finally {
+            Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lact-windows-foundation-debug
+          path: target/debug/lact.exe
+          if-no-files-found: error
