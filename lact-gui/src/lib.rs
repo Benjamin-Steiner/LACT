@@ -1,5 +1,6 @@
 mod app;
 mod config;
+#[cfg(unix)]
 mod service_setup;
 
 use std::{
