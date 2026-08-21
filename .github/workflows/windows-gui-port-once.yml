@@ -6,6 +6,11 @@ on:
       - windows/platform-foundation-20260821
     paths:
       - '.github/workflows/windows-gui-port-once.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/windows-gui-port-once.yml'
 
 permissions:
   contents: write
