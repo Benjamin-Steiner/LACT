@@ -1,4 +1,3 @@
-use amdgpu_sysfs::gpu_handle::{PerformanceLevel, PowerLevelKind};
 use indexmap::IndexMap;
 use nvml_wrapper::enums::device::PowerMizerMode;
 use serde::{Deserialize, Serialize};
@@ -6,6 +5,7 @@ use serde_with::skip_serializing_none;
 
 use crate::{
     FanControlMode, FanCurveMap, NvidiaThermalOptions, PmfwOptions, ProfileRule, default_fan_curve,
+    platform_types::{PerformanceLevel, PowerLevelKind},
     request::{ClockspeedType, SetClocksCommand},
 };
 
