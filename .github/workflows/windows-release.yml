@@ -1,11 +1,6 @@
 name: Windows preview release
 
 on:
-  push:
-    branches:
-      - windows/platform-foundation-20260821
-    paths:
-      - '.github/workflows/windows-release.yml'
   workflow_dispatch:
 
 permissions:
