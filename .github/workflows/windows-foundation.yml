@@ -1,0 +1,46 @@
+name: Windows foundation checks
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-foundation-manual
+  cancel-in-progress: true
+
+jobs:
+  windows-checks:
+    runs-on: windows-2025
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: windows/platform-foundation-20260821
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97.0'
+
+      - name: Check schema and client
+        run: cargo check -p lact-schema -p lact-client
+
+      - name: Check Windows daemon
+        run: cargo check -p lact-daemon --no-default-features --features nvidia
+
+      - name: Build daemon/CLI smoke binary
+        run: cargo build -p lact --no-default-features --features nvidia --bin lact
+
+      - name: Start daemon and query it with the CLI
+        shell: pwsh
+        run: |
+          $daemon = Start-Process -FilePath .\target\debug\lact.exe -ArgumentList 'daemon' -PassThru
+          try {
+            Start-Sleep -Seconds 2
+            & .\target\debug\lact.exe cli list-gpus
+            if ($LASTEXITCODE -ne 0) {
+              throw "LACT CLI smoke test failed with exit code $LASTEXITCODE"
+            }
+          }
+          finally {
+            Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+          }

@@ -1,0 +1,281 @@
+name: Windows NVIDIA safe GUI preview
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/windows-release.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-nvidia-preview
+  cancel-in-progress: true
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: windows/platform-foundation-20260821
+
+      - name: Verify fail-closed Windows source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Select-String -Path .\lact-gui\src\lib.rs -Pattern 'windows_app_safe::WindowsApp' -Quiet)) {
+            throw 'Windows release is not wired to the monitoring-only safe GUI'
+          }
+          if (-not (Select-String -Path .\lact-client\src\lib.rs -Pattern 'I_UNDERSTAND_THIS_IS_EXPERIMENTAL' -Quiet)) {
+            throw 'Windows client GPU-write guard is missing'
+          }
+          if (Select-String -Path .\lact-gui\src\windows_app_safe.rs -Pattern 'set_power_cap|set_clocks_value|batch_set_clocks_value|set_gpu_config' -Quiet) {
+            throw 'Safe Windows GUI unexpectedly contains a GPU write call'
+          }
+
+      - name: Set up MSYS2 GTK runtime
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gtk4
+            mingw-w64-x86_64-libadwaita
+            mingw-w64-x86_64-gdk-pixbuf2
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-gsettings-desktop-schemas
+            mingw-w64-x86_64-hicolor-icon-theme
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97.0'
+          targets: x86_64-pc-windows-gnu
+
+      - name: Build windowed GUI and backend
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          PKG_CONFIG_ALLOW_CROSS: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
+
+          $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
+          $mingwBin = Join-Path $mingw 'bin'
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;$mingwBin;$env:PATH"
+          $env:PKG_CONFIG = Join-Path $mingwBin 'pkgconf.exe'
+          $env:PKG_CONFIG_PATH = "$(Join-Path $mingw 'lib\pkgconfig');$(Join-Path $mingw 'share\pkgconfig')"
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = Join-Path $mingwBin 'gcc.exe'
+
+          & $env:PKG_CONFIG --modversion glib-2.0
+          & $env:PKG_CONFIG --modversion libadwaita-1
+
+          cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features lact-gui,nvidia --bin lact-gui-windows
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\lact-gui-windows.exe .\target\x86_64-pc-windows-gnu\release\LACT-GUI.exe -Force
+
+          cargo build --release -p lact --target x86_64-pc-windows-gnu --no-default-features --features nvidia --bin lact
+
+      - name: Assemble portable runtime
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $mingw = Join-Path $env:MSYS2_LOCATION 'mingw64'
+          $mingwBin = Join-Path $mingw 'bin'
+          $dist = 'dist\LACT-Windows-NVIDIA-Safe-Preview'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\LACT-GUI.exe "$dist\LACT-GUI.exe"
+          Copy-Item .\target\x86_64-pc-windows-gnu\release\lact.exe "$dist\lact.exe"
+
+          if (-not (Test-Path "$dist\LACT-GUI.exe")) { throw 'LACT-GUI.exe missing' }
+          if (-not (Test-Path "$dist\lact.exe")) { throw 'lact.exe backend missing' }
+          $guiHash = (Get-FileHash "$dist\LACT-GUI.exe" -Algorithm SHA256).Hash
+          $backendHash = (Get-FileHash "$dist\lact.exe" -Algorithm SHA256).Hash
+          if ($guiHash -eq $backendHash) { throw 'GUI and backend unexpectedly contain identical binaries' }
+
+          $objdump = Join-Path $mingwBin 'objdump.exe'
+          $guiHeaders = (& $objdump -p "$dist\LACT-GUI.exe" 2>$null) -join "`n"
+          $backendHeaders = (& $objdump -p "$dist\lact.exe" 2>$null) -join "`n"
+          if ($guiHeaders -notmatch 'Subsystem\s+00000002\s+\(Windows GUI\)') {
+            throw 'LACT-GUI.exe is not a Windows GUI-subsystem binary'
+          }
+          if ($backendHeaders -notmatch 'Subsystem\s+00000003\s+\(Windows CUI\)') {
+            throw 'lact.exe is not a Windows console/backend binary'
+          }
+
+          $copyTrees = @(
+            @{ Source = "$mingw\share\glib-2.0\schemas"; Destination = "$dist\share\glib-2.0\schemas" },
+            @{ Source = "$mingw\share\icons\Adwaita"; Destination = "$dist\share\icons\Adwaita" },
+            @{ Source = "$mingw\share\icons\hicolor"; Destination = "$dist\share\icons\hicolor" },
+            @{ Source = "$mingw\share\fontconfig"; Destination = "$dist\share\fontconfig" },
+            @{ Source = "$mingw\etc\fonts"; Destination = "$dist\etc\fonts" },
+            @{ Source = "$mingw\lib\gdk-pixbuf-2.0"; Destination = "$dist\lib\gdk-pixbuf-2.0" },
+            @{ Source = "$mingw\lib\gio\modules"; Destination = "$dist\lib\gio\modules" },
+            @{ Source = "$mingw\lib\gtk-4.0"; Destination = "$dist\lib\gtk-4.0" },
+            @{ Source = "$mingw\share\mime"; Destination = "$dist\share\mime" }
+          )
+          foreach ($tree in $copyTrees) {
+            if (Test-Path $tree.Source) {
+              New-Item -ItemType Directory -Force -Path (Split-Path $tree.Destination) | Out-Null
+              Copy-Item $tree.Source $tree.Destination -Recurse -Force
+            }
+          }
+
+          $queryLoaders = Join-Path $mingwBin 'gdk-pixbuf-query-loaders.exe'
+          if (Test-Path $queryLoaders) {
+            Copy-Item $queryLoaders "$dist\gdk-pixbuf-query-loaders.exe"
+          }
+
+          $queue = [System.Collections.Generic.Queue[string]]::new()
+          $seen = @{}
+          $queue.Enqueue((Resolve-Path "$dist\LACT-GUI.exe").Path)
+          $queue.Enqueue((Resolve-Path "$dist\lact.exe").Path)
+          if (Test-Path "$dist\gdk-pixbuf-query-loaders.exe") {
+            $queue.Enqueue((Resolve-Path "$dist\gdk-pixbuf-query-loaders.exe").Path)
+          }
+          Get-ChildItem "$dist\lib" -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object {
+            $queue.Enqueue($_.FullName)
+          }
+
+          while ($queue.Count -gt 0) {
+            $binary = $queue.Dequeue()
+            $deps = & $objdump -p $binary 2>$null |
+              Select-String '^\s*DLL Name:\s*(.+)$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+
+            foreach ($dep in $deps) {
+              $key = $dep.ToLowerInvariant()
+              if ($seen.ContainsKey($key)) { continue }
+              $seen[$key] = $true
+              $src = Join-Path $mingwBin $dep
+              if (-not (Test-Path $src)) { continue }
+              $dst = Join-Path $dist $dep
+              Copy-Item $src $dst -Force
+              $queue.Enqueue((Resolve-Path $dst).Path)
+            }
+          }
+
+          @'
+          LACT Windows NVIDIA Safe Preview
+          ================================
+
+          Start LACT-GUI.exe.
+
+          lact.exe is the local backend/CLI and is started automatically by the GUI.
+
+          Safety behavior:
+          - the compiled GUI is monitoring-only and contains no GPU write calls
+          - lact-client blocks GPU-changing requests on Windows by default
+          - clocks, voltage, fan, power limit, profiles and driver state are not changed
+          - live NVIDIA telemetry is read through NVML once per second
+
+          Diagnostics:
+          %LOCALAPPDATA%\LACT\logs\bootstrap.log
+          %LOCALAPPDATA%\LACT\logs\gui.log
+          %LOCALAPPDATA%\LACT\logs\daemon.log
+
+          Use the Logs button in the GUI to open that directory.
+          '@ | Set-Content -Encoding utf8 "$dist\README-WINDOWS.txt"
+
+      - name: Build installer and portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = 'dist\LACT-Windows-NVIDIA-Safe-Preview'
+          $zip = '.\dist\LACT-Windows-NVIDIA-Safe-Preview-Portable.zip'
+          $setup = '.\dist\LACT-Windows-NVIDIA-Safe-Preview-Setup.exe'
+
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+
+          $iss = @'
+          [Setup]
+          AppId=LACT-Windows-NVIDIA-Safe-Preview
+          AppName=LACT Windows NVIDIA Safe Preview
+          AppVersion=0.10.1-preview
+          AppPublisher=LACT Windows Port
+          DefaultDirName={localappdata}\Programs\LACT Windows NVIDIA Safe Preview
+          DefaultGroupName=LACT Windows NVIDIA Safe Preview
+          UninstallDisplayIcon={app}\LACT-GUI.exe
+          OutputDir=dist
+          OutputBaseFilename=LACT-Windows-NVIDIA-Safe-Preview-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          PrivilegesRequired=lowest
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Files]
+          Source: "dist\LACT-Windows-NVIDIA-Safe-Preview\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{group}\LACT Windows NVIDIA Safe Preview"; Filename: "{app}\LACT-GUI.exe"
+          Name: "{autodesktop}\LACT Windows NVIDIA Safe Preview"; Filename: "{app}\LACT-GUI.exe"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\LACT-GUI.exe"; Description: "Launch LACT Windows NVIDIA Safe Preview"; Flags: nowait postinstall skipifsilent
+          '@
+          $iss | Set-Content -Encoding ascii .\windows-gui-preview.iss
+
+          $isccCandidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler was not found' }
+          & $iscc .\windows-gui-preview.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          if (-not (Test-Path $setup)) { throw 'Installer was not produced' }
+          if (-not (Test-Path $zip)) { throw 'Portable ZIP was not produced' }
+
+          $checksumLines = foreach ($file in @($setup, $zip)) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $checksumLines | Set-Content -Encoding ascii .\dist\LACT-Windows-NVIDIA-Safe-Preview.sha256.txt
+
+      - name: Upload GUI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: LACT-Windows-NVIDIA-Safe-Preview
+          path: |
+            dist/LACT-Windows-NVIDIA-Safe-Preview-Setup.exe
+            dist/LACT-Windows-NVIDIA-Safe-Preview-Portable.zip
+            dist/LACT-Windows-NVIDIA-Safe-Preview.sha256.txt
+          if-no-files-found: error
+
+      - name: Create GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-gui-preview-${{ github.run_number }}"
+          gh release create $tag `
+            .\dist\LACT-Windows-NVIDIA-Safe-Preview-Setup.exe `
+            .\dist\LACT-Windows-NVIDIA-Safe-Preview-Portable.zip `
+            .\dist\LACT-Windows-NVIDIA-Safe-Preview.sha256.txt `
+            --repo "${{ github.repository }}" `
+            --target "windows/platform-foundation-20260821" `
+            --title "LACT Windows NVIDIA Safe Preview ${{ github.run_number }}" `
+            --prerelease `
+            --notes "Monitoring-only Windows preview. LACT-GUI.exe opens a real GUI and starts the separate lact.exe backend. GPU-changing requests are blocked by default in lact-client, and the compiled GUI contains no clock/power/voltage/fan/profile write calls. Logs are written to %LOCALAPPDATA%\\LACT\\logs (bootstrap.log, gui.log and daemon.log)."

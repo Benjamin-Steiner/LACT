@@ -1,6 +1,9 @@
-use amdgpu_sysfs::gpu_handle::{PerformanceLevel, PowerLevelKind};
+#[path = "platform_types.rs"]
+mod platform_types;
+
 use indexmap::IndexMap;
 use nvml_wrapper::enums::device::PowerMizerMode;
+use platform_types::{PerformanceLevel, PowerLevelKind};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 

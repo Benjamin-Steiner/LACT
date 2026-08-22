@@ -8,9 +8,17 @@ use lact_schema::{
     config::{GpuConfig, Profile, ProfileHooks},
 };
 
+#[cfg(unix)]
 use amdgpu_sysfs::gpu_handle::power_profile_mode::PowerProfileModesTable;
+#[cfg(windows)]
+type PowerProfileModesTable = serde_json::Value;
 use anyhow::Context;
-use connection::{DaemonConnection, tcp::TcpConnection, unix::UnixConnection};
+use connection::{DaemonConnection, tcp::TcpConnection};
+#[cfg(unix)]
+use connection::unix::UnixConnection;
+#[cfg(windows)]
+use connection::windows::{DEFAULT_PIPE_NAME, NamedPipeConnection};
+#[cfg(unix)]
 use nix::unistd::getuid;
 use schema::{
     ClocksInfo, DeviceInfo, DeviceListEntry, DeviceStats, PowerStates, ProfilesInfo, Request,
@@ -18,18 +26,22 @@ use schema::{
     request::{ConfirmCommand, ProfileBase, SetClocksCommand},
 };
 use serde::de::DeserializeOwned;
-use std::{
-    fmt, future::Future, io, os::unix::net::UnixStream, path::PathBuf, pin::Pin, rc::Rc,
-    time::Duration,
-};
+use std::{fmt, future::Future, io, pin::Pin, rc::Rc, time::Duration};
+#[cfg(unix)]
+use std::{os::unix::net::UnixStream, path::PathBuf};
 use tokio::{
     net::ToSocketAddrs,
     sync::{Mutex, broadcast},
 };
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 const STATUS_MSG_CHANNEL_SIZE: usize = 16;
 const RECONNECT_INTERVAL_MS: u64 = 500;
+
+#[cfg(windows)]
+const WINDOWS_GPU_WRITE_UNLOCK_ENV: &str = "LACT_WINDOWS_ENABLE_GPU_WRITES";
+#[cfg(windows)]
+const WINDOWS_GPU_WRITE_UNLOCK_VALUE: &str = "I_UNDERSTAND_THIS_IS_EXPERIMENTAL";
 
 #[derive(Clone)]
 pub struct DaemonClient {
@@ -45,9 +57,19 @@ impl DaemonClient {
     }
 
     pub async fn connect_with_reconnect(reconnect: bool) -> anyhow::Result<Self> {
-        let path = get_socket_path()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "socket file not found"))?;
-        let stream = UnixConnection::connect(&path).await?;
+        #[cfg(unix)]
+        let stream: Box<dyn DaemonConnection> = {
+            let path = get_socket_path()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "socket file not found"))?;
+            UnixConnection::connect(&path).await?
+        };
+
+        #[cfg(windows)]
+        let stream: Box<dyn DaemonConnection> = {
+            let pipe_name = std::env::var("LACT_DAEMON_PIPE")
+                .unwrap_or_else(|_| DEFAULT_PIPE_NAME.to_owned());
+            NamedPipeConnection::connect(pipe_name).await?
+        };
 
         Ok(Self {
             stream: Rc::new(Mutex::new(stream)),
@@ -68,6 +90,7 @@ impl DaemonClient {
         })
     }
 
+    #[cfg(unix)]
     pub fn from_stream(stream: UnixStream, embedded: bool) -> anyhow::Result<Self> {
         let connection = UnixConnection::try_from(stream)?;
         Ok(Self {
@@ -87,6 +110,17 @@ impl DaemonClient {
         request: Request<'a>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<T>> + 'a>> {
         Box::pin(async {
+            #[cfg(windows)]
+            if is_windows_gpu_write_request(&request) && !windows_gpu_writes_enabled() {
+                warn!(
+                    request = ?request,
+                    "Blocked Windows GPU-changing request in Safe Read-Only Mode"
+                );
+                return Err(anyhow::anyhow!(
+                    "Windows Safe Read-Only Mode is active. This preview blocks GPU-changing requests in the LACT client."
+                ));
+            }
+
             let mut stream = self.stream.lock().await;
 
             let request_payload = serde_json::to_string(&request)?;
@@ -109,12 +143,12 @@ impl DaemonClient {
                         return Err(err);
                     }
 
-                    error!("Could not make request: {err}, reconnecting to socket");
+                    error!("Could not make request: {err}, reconnecting to service");
 
                     loop {
                         match stream.new_connection().await {
                             Ok(new_connection) => {
-                                info!("Established new socket connection");
+                                info!("Established new daemon connection");
                                 *stream = new_connection;
                                 drop(stream);
 
@@ -192,8 +226,7 @@ impl DaemonClient {
     }
 
     pub async fn create_profile(&self, name: String, base: ProfileBase) -> anyhow::Result<()> {
-        self.make_request(Request::CreateProfile { name, base })
-            .await
+        self.make_request(Request::CreateProfile { name, base }).await
     }
 
     pub async fn delete_profile(&self, name: String) -> anyhow::Result<()> {
@@ -214,8 +247,7 @@ impl DaemonClient {
     }
 
     pub async fn evaluate_profile_rule(&self, rule: ProfileRule) -> anyhow::Result<bool> {
-        self.make_request(Request::EvaluateProfileRule { rule })
-            .await
+        self.make_request(Request::EvaluateProfileRule { rule }).await
     }
 
     pub async fn get_gpu_config(&self, id: &str) -> anyhow::Result<Option<GpuConfig>> {
@@ -230,12 +262,25 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn set_power_cap(&self, id: &str, cap: Option<f64>) -> anyhow::Result<u64> {
+        self.make_request(Request::SetPowerCap { id, cap }).await
+    }
+
     pub async fn set_clocks_value(
         &self,
         id: &str,
         command: SetClocksCommand,
     ) -> anyhow::Result<u64> {
         self.make_request(Request::SetClocksValue { id, command })
+            .await
+    }
+
+    pub async fn batch_set_clocks_value(
+        &self,
+        id: &str,
+        commands: Vec<SetClocksCommand>,
+    ) -> anyhow::Result<u64> {
+        self.make_request(Request::BatchSetClocksValue { id, commands })
             .await
     }
 
@@ -250,9 +295,43 @@ impl DaemonClient {
     }
 
     pub async fn confirm_pending_config(&self, command: ConfirmCommand) -> anyhow::Result<()> {
-        self.make_request(Request::ConfirmPendingConfig(command))
-            .await
+        self.make_request(Request::ConfirmPendingConfig(command)).await
     }
+}
+
+#[cfg(windows)]
+fn windows_gpu_writes_enabled() -> bool {
+    std::env::var(WINDOWS_GPU_WRITE_UNLOCK_ENV)
+        .is_ok_and(|value| value == WINDOWS_GPU_WRITE_UNLOCK_VALUE)
+}
+
+#[cfg(windows)]
+fn is_windows_gpu_write_request(request: &Request<'_>) -> bool {
+    matches!(
+        request,
+        Request::SetFanControl(_)
+            | Request::ResetPmfw { .. }
+            | Request::SetPowerCap { .. }
+            | Request::SetPerformanceLevel { .. }
+            | Request::SetClocksValue { .. }
+            | Request::BatchSetClocksValue { .. }
+            | Request::SetPowerProfileMode { .. }
+            | Request::SetEnabledPowerStates { .. }
+            | Request::SetProfile { .. }
+            | Request::CreateProfile { .. }
+            | Request::DeleteProfile { .. }
+            | Request::MoveProfile { .. }
+            | Request::HoldProfile { .. }
+            | Request::ReleaseProfile { .. }
+            | Request::SetProfileRule { .. }
+            | Request::SetGpuConfig { .. }
+            | Request::DetachGpu { .. }
+            | Request::ReattachGpu { .. }
+            | Request::EnableOverdrive
+            | Request::DisableOverdrive
+            | Request::ConfirmPendingConfig(_)
+            | Request::RestConfig
+    )
 }
 
 impl fmt::Debug for DaemonClient {
@@ -263,6 +342,7 @@ impl fmt::Debug for DaemonClient {
     }
 }
 
+#[cfg(unix)]
 fn get_socket_path() -> Option<PathBuf> {
     let root_path = PathBuf::from("/run/lactd.sock");
 
